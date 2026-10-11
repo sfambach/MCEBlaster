@@ -6,7 +6,7 @@ The input picture at full height: the VGA output runs at the input's own timing,
 - Core 1 samples each line at the measured pixel clock (as in step 7), scales the picture window to 640 pixels and writes it into an output ring. Input line N goes out as line N + 3, so it is ready before the output reaches it.
 - The output PIO waits for the end of each input HSync, waits until the picture window starts and sends 640 pixels at a clock that makes them last exactly as long as the window.
 - Capture and output restart together in every VSync, so both count the same lines.
-- The picture window starts at the standard porches of the mode and grows to every non-black pixel and line seen; the line "Window" shows it. Lines outside the window are checked whole, lines inside only in the margins next to it.
+- The picture window starts at the standard porches of the mode and grows to every non-black pixel and line seen, by at most 16 pixels and 8 lines for a known mode so a coloured border does not count as picture; the line "Window" shows it. "lag" on the Frames line is how many lines core 1 fell behind the capture (the ring holds ten). Lines outside the window are checked whole, lines inside only in the margins next to it.
 - Core 0 measures the input once per second, latches the mode, snaps the pixel clock to the nearest known clock and draws the text (as in step 7). The text bitmaps are built on core 0, so core 1 never misses an input frame.
 - Without an input signal there is no sync to send a picture with, so the monitor shows no signal. Use [step 7](../07_input_test_pixel_clock/) to look at the analysis then.
 - `PIXEL CLOCK` button: hide or show the text.

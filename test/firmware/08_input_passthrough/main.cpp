@@ -206,6 +206,8 @@ static uint16_t XMap[HVisible];
 // to it, lines outside are checked whole, so it fits into the line time.
 static volatile uint32_t WinLeft = 0, WinRight = 0, WinTop = 0, WinBottom = 0;
 
+static constexpr uint32_t MaxGrowPx = 16, MaxGrowLines = 8;
+
 static void buildXMap() {
   for (uint32_t X = 0; X != HVisible; ++X)
     XMap[X] = WinLeft + X * (WinRight - WinLeft) / HVisible;
@@ -223,6 +225,8 @@ static void resetWindow(const CaptureSetup &S) {
 enum class CaptureFail : uint32_t { None, NoVSync, VSyncEnd, Line };
 static volatile uint32_t FramesOk = 0;
 static volatile uint32_t FramesFailed = 0;
+// Most lines the capture was ahead of core 1; the capture ring holds ten.
+static volatile uint32_t MaxLag = 0;
 static volatile CaptureFail LastFail = CaptureFail::None;
 static volatile uint32_t LastFailLine = 0;
 
@@ -411,6 +415,10 @@ static bool __not_in_flash_func(captureFrame)(const CaptureSetup &S) {
         LastFailLine = Line;
         return false;
       }
+    uint32_t Done = (Words - dma_channel_hw_addr(CapChan)->transfer_count) /
+                    WordsPerLine;
+    if (Done - Line > MaxLag)
+      MaxLag = Done - Line;
     uint32_t Start = Line * S.Samples;
     auto Lit = [&](uint32_t X) {
       return Ring[(Start + X) & Mask] & S.ColorMask;
@@ -435,7 +443,18 @@ static bool __not_in_flash_func(captureFrame)(const CaptureSetup &S) {
     uint32_t OutOff = (Line + OutDelay) * HVisible & (OutRingBytes - 1);
     uint8_t *Dst =
         OutOff + HVisible <= OutRingBytes ? OutRing + OutOff : Out;
-    if (CapOff + S.Samples <= RingBytes) {
+    if (CapOff + S.Samples <= RingBytes && S.Src != Source::MDA) {
+      // EGA and CGA: the six colour bits are the low sample bits and go out
+      // unchanged; the top two bits land on pins the output does not drive.
+      const uint8_t *Src = Ring + CapOff;
+      const uint16_t *Map = XMap;
+      for (uint32_t X = 0; X != HVisible; X += 4, Map += 4) {
+        Dst[X] = Src[Map[0]];
+        Dst[X + 1] = Src[Map[1]];
+        Dst[X + 2] = Src[Map[2]];
+        Dst[X + 3] = Src[Map[3]];
+      }
+    } else if (CapOff + S.Samples <= RingBytes) {
       const uint8_t *Src = Ring + CapOff;
       for (uint32_t X = 0; X != HVisible; ++X)
         Dst[X] = ColorLUT[Src[XMap[X]]];
@@ -457,6 +476,18 @@ static bool __not_in_flash_func(captureFrame)(const CaptureSetup &S) {
         FoundRight = X > FoundRight ? X : FoundRight;
         break;
       }
+  }
+  // A known mode's window grows only a little: a card may start its picture
+  // a few pixels early, but a coloured border must not count as picture.
+  if (S.Width && S.Height) {
+    uint32_t MinLeft = S.Left > MaxGrowPx ? S.Left - MaxGrowPx : 0;
+    uint32_t MinTop = S.Top > MaxGrowLines ? S.Top - MaxGrowLines : 0;
+    FoundLeft = FoundLeft < MinLeft ? MinLeft : FoundLeft;
+    FoundTop = FoundTop < MinTop ? MinTop : FoundTop;
+    uint32_t MaxRight = S.Left + S.Width + MaxGrowPx;
+    uint32_t MaxBottom = S.Top + S.Height + MaxGrowLines;
+    FoundRight = FoundRight > MaxRight ? MaxRight : FoundRight;
+    FoundBottom = FoundBottom > MaxBottom ? MaxBottom : FoundBottom;
   }
   if (FoundLeft != Left || FoundRight != Right || FoundTop != Top ||
       FoundBottom != Bottom) {
@@ -946,6 +977,24 @@ struct CaptureClock {
 static CaptureClock captureClock(const char *Mode, float HHz,
                                  const PixelClock &Measured) {
   CaptureClock C;
+  float ModeHz = 0;
+  for (const TTLMode &M : TTLModes)
+    if (M.Name == Mode)
+      ModeHz = M.PixelHz;
+  // The mode's usual clock wins whenever the measurement is near it: the
+  // measurement scatters by a few tenths of a percent, and 28.322 and
+  // 28.636 MHz are only 1.1 % apart, so the nearest known clock alone
+  // picked the wrong one on a 720x400 input.
+  if (Measured.Hz > 0 && ModeHz > 0 &&
+      std::fabs(Measured.Hz - ModeHz) / ModeHz < SnapTolerance) {
+    C.Hz = ModeHz;
+    for (const KnownClock &K : KnownClocks)
+      if (K.Hz == ModeHz)
+        C.Name = K.Name;
+    C.PixelsPerLine = (uint32_t)std::lround(C.Hz / HHz);
+    C.Hz = C.PixelsPerLine * HHz;
+    return C;
+  }
   float Best = SnapTolerance;
   for (const KnownClock &K : KnownClocks) {
     float Off = std::fabs(Measured.Hz - K.Hz) / K.Hz;
@@ -958,9 +1007,7 @@ static CaptureClock captureClock(const char *Mode, float HHz,
   if (Measured.Hz > 0 && !C.Name) {
     C.Hz = Measured.Hz;
   } else if (Measured.Hz == 0) {
-    for (const TTLMode &M : TTLModes)
-      if (M.Name == Mode)
-        C.Hz = M.PixelHz;
+    C.Hz = ModeHz;
     for (const KnownClock &K : KnownClocks)
       if (K.Hz == C.Hz)
         C.Name = K.Name;
@@ -1160,11 +1207,13 @@ static void update(const Measurement &M) {
   FramesOk = 0;
   FramesFailed = 0;
   static const char *FailNames[] = {"-", "no VSync", "VSync end", "line"};
+  uint32_t Lag = MaxLag;
+  MaxLag = 0;
   if (Failed)
     Line(13, "Frames: %lu ok %lu bad (%s %lu)", Ok, Failed,
          FailNames[(uint32_t)LastFail], LastFailLine);
   else
-    Line(13, "Frames: %lu ok", Ok);
+    Line(13, "Frames: %lu ok, lag %lu lines", Ok, Lag);
   if (WatchdogReset && (ResetStage[0] || ResetStage[1]))
     Line(14, "Hang reset: core0 %lu core1 %lu", ResetStage[0], ResetStage[1]);
   Line(15, "PIXEL CLOCK: hide text");

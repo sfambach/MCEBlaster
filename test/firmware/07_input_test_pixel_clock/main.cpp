@@ -925,6 +925,24 @@ struct CaptureClock {
 static CaptureClock captureClock(const char *Mode, float HHz,
                                  const PixelClock &Measured) {
   CaptureClock C;
+  float ModeHz = 0;
+  for (const TTLMode &M : TTLModes)
+    if (M.Name == Mode)
+      ModeHz = M.PixelHz;
+  // The mode's usual clock wins whenever the measurement is near it: the
+  // measurement scatters by a few tenths of a percent, and 28.322 and
+  // 28.636 MHz are only 1.1 % apart, so the nearest known clock alone
+  // picked the wrong one on a 720x400 input.
+  if (Measured.Hz > 0 && ModeHz > 0 &&
+      std::fabs(Measured.Hz - ModeHz) / ModeHz < SnapTolerance) {
+    C.Hz = ModeHz;
+    for (const KnownClock &K : KnownClocks)
+      if (K.Hz == ModeHz)
+        C.Name = K.Name;
+    C.PixelsPerLine = (uint32_t)std::lround(C.Hz / HHz);
+    C.Hz = C.PixelsPerLine * HHz;
+    return C;
+  }
   float Best = SnapTolerance;
   for (const KnownClock &K : KnownClocks) {
     float Off = std::fabs(Measured.Hz - K.Hz) / K.Hz;
@@ -937,9 +955,7 @@ static CaptureClock captureClock(const char *Mode, float HHz,
   if (Measured.Hz > 0 && !C.Name) {
     C.Hz = Measured.Hz;
   } else if (Measured.Hz == 0) {
-    for (const TTLMode &M : TTLModes)
-      if (M.Name == Mode)
-        C.Hz = M.PixelHz;
+    C.Hz = ModeHz;
     for (const KnownClock &K : KnownClocks)
       if (K.Hz == C.Hz)
         C.Name = K.Name;
