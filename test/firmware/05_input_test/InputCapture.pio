@@ -1,0 +1,45 @@
+;; Copyright (C) 2026 Stefan Fambach (SteFam), https://www.fambach.net
+;; License: PolyForm Noncommercial 1.0.0, see LICENSE.md in this folder.
+;; Free for noncommercial use; commercial use only with the author's consent.
+;;
+;; Samples 8 input pins per sample, starting at the end of each HSync pulse.
+;; The number of samples per line minus one is pulled once from the TX FIFO.
+;; Two instructions per sample, so the sample rate is the SM clock / 2.
+;; GPIO 7 is the TTL HSync input.
+
+.program CapturePosHSync
+    pull block
+.wrap_target
+    mov x, osr
+    wait 1 gpio 7
+    wait 0 gpio 7
+sample:
+    in pins, 8
+    jmp x-- sample
+.wrap
+
+.program CaptureNegHSync
+    pull block
+.wrap_target
+    mov x, osr
+    wait 0 gpio 7
+    wait 1 gpio 7
+sample:
+    in pins, 8
+    jmp x-- sample
+.wrap
+
+% c-sdk {
+static inline pio_sm_config CaptureConfig(uint Offset, bool PosHSync,
+                                          uint FirstGPIO, float ClkDiv) {
+  pio_sm_config Conf =
+      PosHSync ? CapturePosHSync_program_get_default_config(Offset)
+               : CaptureNegHSync_program_get_default_config(Offset);
+  sm_config_set_in_pins(&Conf, FirstGPIO);
+  // Shift right: the first sample ends up in the lowest byte.
+  sm_config_set_in_shift(&Conf, /*shift_right=*/true, /*autopush=*/true, 32);
+  sm_config_set_fifo_join(&Conf, PIO_FIFO_JOIN_RX);
+  sm_config_set_clkdiv(&Conf, ClkDiv);
+  return Conf;
+}
+%}
