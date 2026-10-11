@@ -6,14 +6,15 @@ The TTL output of a video card has no clock line, so the clock is found from the
 
 1. A PIO samples the colour pins at 126 MHz (252 MHz / 2), 24 bursts of 16384 samples spread over different lines.
 2. Every run of one colour lasts a whole number of pixels. The shortest frequent run length is one pixel.
-3. Averaging all runs as multiples of that pixel time gives the pixel time to a fraction of a sample.
-4. Pixels per line = pixel clock / line frequency must be a whole number; rounding it and multiplying back by the measured line frequency gives the exact clock.
+3. Averaging all runs as multiples of that pixel time gives a first pixel time, good to about 1 %.
+4. Then the distances between rising edges of the same pin are used, in three passes about 8, 40 and 200 pixels apart: each is a whole number of pixels, and the longer the distance, the finer the result (well below 0.1 %). Rising edges of one pin only, so slow or fast edges do not bias it.
+5. Pixels per line = pixel clock / line frequency must be a whole number; rounding it and multiplying back by the measured line frequency gives the exact clock.
 
-Shown on screen and over USB serial: pixel time, pixel clock, pixels per line (total, including blanking), the matching standard clock if any (CGA 14.318 MHz, EGA/MDA 16.257 MHz, VGA 25.175 / 28.322 MHz), the number of runs used and how well they fit (rms deviation in pixels).
+Shown on screen and over USB serial: pixel time, pixel clock, pixels per line (total, including blanking), the matching standard clock if any (CGA 14.318 MHz, EGA/MDA 16.257 MHz, VGA 25.175 / 28.322 MHz, 8x NTSC 28.636 MHz, used by some Trident cards), the number of runs used and how well they fit (rms deviation in pixels).
 
 It needs fine detail on the screen: single pixel changes. The shaded block characters 176/177 (░ ▒) are ideal; a plain DOS prompt may not be enough.
 
-Expected for VGA text mode (720x400, 31.469 kHz): 28.322 MHz, 900 pixels per line.
+Expected for VGA text mode (720x400, 31.469 kHz): 28.322 MHz and 900 pixels per line, or 28.636 MHz and 910 pixels per line on cards that use the 8x NTSC clock.
 
 ## Build
 

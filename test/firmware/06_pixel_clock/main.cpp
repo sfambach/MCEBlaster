@@ -21,6 +21,7 @@
 #include "hardware/pwm.h"
 #include "pico/stdlib.h"
 #include <cmath>
+#include <initializer_list>
 #include <cstdio>
 #include <cstring>
 
@@ -325,6 +326,10 @@ static constexpr uint32_t NumBursts = 24;
 static constexpr uint32_t MaxRun = 256; // longer runs are blanking
 static uint32_t Burst[BurstWords];
 static uint32_t RunCount[MaxRun];
+// Sample positions of the rising edges of each pin in one burst.
+static constexpr uint32_t MaxEdges = 4096;
+static uint16_t Edges[8][MaxEdges];
+static uint32_t NumEdges[8];
 
 static PIO SamplePio = pio1;
 static uint SampleSM;
@@ -345,9 +350,8 @@ static void initFastSample() {
   SampleChan = dma_claim_unused_channel(true);
 }
 
-/// Samples \p FirstGPIO.. for one burst and adds its run lengths of the pins
-/// in \p Mask (relative to \p FirstGPIO) to RunCount.
-static void sampleBurst(uint32_t FirstGPIO, uint8_t Mask) {
+/// Samples \p FirstGPIO.. for one burst into Burst[].
+static void captureBurst(uint32_t FirstGPIO) {
   FastSamplePioInit(SamplePio, SampleSM, SampleOffset, FirstGPIO);
   pio_sm_set_clkdiv_int_frac(SamplePio, SampleSM, SampleClkDiv, 0);
   dma_channel_config Conf = dma_channel_get_default_config(SampleChan);
@@ -362,7 +366,10 @@ static void sampleBurst(uint32_t FirstGPIO, uint8_t Mask) {
   pio_sm_set_enabled(SamplePio, SampleSM, true);
   dma_channel_wait_for_finish_blocking(SampleChan);
   pio_sm_set_enabled(SamplePio, SampleSM, false);
+}
 
+/// Adds the run lengths of the pins in \p Mask of Burst[] to RunCount.
+static void countRuns(uint8_t Mask) {
   const uint8_t *Samples = (const uint8_t *)Burst;
   uint8_t Prev = Samples[0] & Mask;
   uint32_t Run = 0;
@@ -380,12 +387,54 @@ static void sampleBurst(uint32_t FirstGPIO, uint8_t Mask) {
   }
 }
 
+/// Collects the rising edges of every pin in \p Mask of Burst[].
+static void findEdges(uint8_t Mask) {
+  const uint8_t *Samples = (const uint8_t *)Burst;
+  std::memset(NumEdges, 0, sizeof(NumEdges));
+  for (uint32_t I = 1; I != BurstWords * 4; ++I) {
+    uint8_t Rising = Samples[I] & ~Samples[I - 1] & Mask;
+    for (uint32_t B = 0; Rising; ++B, Rising >>= 1)
+      if ((Rising & 1) && NumEdges[B] != MaxEdges)
+        Edges[B][NumEdges[B]++] = I;
+  }
+}
+
+/// One refinement pass over the edges of one burst: every pair of rising
+/// edges of the same pin about \p MinPx..2*\p MinPx pixels apart is a whole
+/// number of pixels apart. Rising edges of the same pin only, so a slower
+/// rise than fall does not bias the result. \returns the new pixel time.
+static float refine(float PixelSamples, float MinPx, float &SumD,
+                    float &SumK) {
+  SumD = SumK = 0;
+  float WMin = MinPx * PixelSamples, WMax = 2 * WMin;
+  for (uint32_t B = 0; B != 8; ++B) {
+    const uint16_t *E = Edges[B];
+    uint32_t J = 0;
+    for (uint32_t I = 0; I != NumEdges[B]; ++I) {
+      while (J != NumEdges[B] && E[J] - E[I] < WMin)
+        ++J;
+      if (J == NumEdges[B])
+        break;
+      float D = E[J] - E[I];
+      if (D > WMax)
+        continue;
+      float K = std::round(D / PixelSamples);
+      if (std::fabs(D - K * PixelSamples) > 0.3f * PixelSamples)
+        continue;
+      SumD += D;
+      SumK += K;
+    }
+  }
+  return SumK > 0 ? SumD / SumK : PixelSamples;
+}
+
 static PixelClock measurePixelClock(uint32_t FirstGPIO, uint8_t Mask,
                                     float HHz) {
   PixelClock P;
   std::memset(RunCount, 0, sizeof(RunCount));
   for (uint32_t B = 0; B != NumBursts; ++B) {
-    sampleBurst(FirstGPIO, Mask);
+    captureBurst(FirstGPIO);
+    countRuns(Mask);
     // Not a multiple of the line time, so the bursts land on other lines.
     sleep_us(3137);
   }
@@ -422,6 +471,23 @@ static PixelClock measurePixelClock(uint32_t FirstGPIO, uint8_t Mask,
   if (SumK == 0)
     return P;
   P.PixelSamples = SumR / SumK;
+
+  // Long distances: a whole number of pixels between two edges hundreds of
+  // pixels apart pins the pixel time down to a small fraction of a sample.
+  // Each pass widens the distance as far as the previous estimate allows.
+  float TotalD = 0, TotalK = 0;
+  for (uint32_t B = 0; B != NumBursts; ++B) {
+    captureBurst(FirstGPIO);
+    findEdges(Mask);
+    float Est = P.PixelSamples, D = 0, K = 0;
+    for (float MinPx : {8.0f, 40.0f, 200.0f})
+      Est = refine(Est, MinPx, D, K);
+    TotalD += D;
+    TotalK += K;
+    sleep_us(3137);
+  }
+  if (TotalK > 0)
+    P.PixelSamples = TotalD / TotalK;
   float Dev = 0, DevCnt = 0;
   for (uint32_t R = 2; R != MaxRun; ++R) {
     uint32_t K = (uint32_t)std::lround(R / P.PixelSamples);
@@ -448,10 +514,11 @@ struct KnownClock {
   const char *Name;
 };
 static constexpr KnownClock KnownClocks[] = {
-    {14318181, "CGA"},
+    {14318181.0f, "CGA"},
     {16257000, "EGA/MDA"},
     {25175000, "VGA 640"},
     {28322000, "VGA 720"},
+    {28636363.0f, "8x NTSC"},
 };
 
 static void show(const Measurement &M) {
@@ -494,7 +561,7 @@ static void show(const Measurement &M) {
     if (P.PixelsPerLine)
       Line(8, "Pixels per line: %lu", P.PixelsPerLine);
     for (const KnownClock &K : KnownClocks)
-      if (std::fabs(P.Hz - K.Hz) < K.Hz * 0.01f)
+      if (std::fabs(P.Hz - K.Hz) < K.Hz * 0.002f)
         Line(9, "Known clock: %.3f MHz %s", K.Hz / 1e6f, K.Name);
     Line(10, "Runs: %lu  fit: %.2f px", P.Runs, P.FitPx);
   } else if (Mode) {
