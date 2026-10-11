@@ -33,7 +33,7 @@ static constexpr uint32_t EGA_RGB_GPIO = 0;  // 0-5
 static constexpr uint32_t TTL_VSYNC_GPIO = 6;
 static constexpr uint32_t TTL_HSYNC_GPIO = 7;
 static constexpr uint32_t CGA_RGB_GPIO = 8;  // 8-13
-static constexpr uint32_t MDA_VI_GPIO = 26;  // 26 V, 27 I
+static constexpr uint32_t MDA_VI_GPIO = 26;  // 26 I, 27 V (DE9 pins 6, 7)
 static constexpr uint32_t PIXEL_CLOCK_BTN_GPIO = 22;
 static constexpr uint32_t AUTO_ADJUST_BTN_GPIO = 28;
 
@@ -238,7 +238,7 @@ static void buildLUT(Source Src) {
       C = I & 0x3f;
       break;
     case Source::MDA: {
-      bool Video = I & 0b01, Intensity = I & 0b10;
+      bool Intensity = I & 0b01, Video = I & 0b10;
       C = Video ? (Intensity ? White : Gray) : Black;
       break;
     }
