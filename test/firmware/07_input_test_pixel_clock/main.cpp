@@ -285,9 +285,9 @@ static volatile uint32_t WinLeft = 0, WinRight = 0, WinTop = 0, WinBottom = 0;
 // is lost; the text goes on top after the last of them (RowLast). Empty
 // range: the line is outside the picture. Precomputed so the line loop does
 // no division.
-static constexpr uint32_t MaxLines = 1024;
-static uint8_t RowBegin[MaxLines], RowEnd[MaxLines];
-static bool RowMerge[MaxLines], RowLast[MaxLines];
+static constexpr uint32_t MaxLines = 640;
+static constexpr uint8_t RowMerge = 1, RowLast = 2;
+static uint8_t RowBegin[MaxLines], RowEnd[MaxLines], RowFlags[MaxLines];
 
 static void buildXMap() {
   for (uint32_t X = 0; X != HVisible; ++X)
@@ -302,10 +302,10 @@ static void buildXMap() {
       End = Begin + 1;
     RowBegin[Line] = Begin;
     RowEnd[Line] = End;
-    RowMerge[Line] = In && Line > Top && PrevEnd > Begin;
     bool NextIn = Line + 1 < Top + Height;
-    RowLast[Line] =
-        In && !(NextIn && (Line + 1 - Top) * Rows / Height < End);
+    bool Merge = In && Line > Top && PrevEnd > Begin;
+    bool Last = In && !(NextIn && (Line + 1 - Top) * Rows / Height < End);
+    RowFlags[Line] = (Merge ? RowMerge : 0) | (Last ? RowLast : 0);
     PrevEnd = In ? End : 0;
   }
 }
@@ -479,7 +479,7 @@ static bool __no_inline_not_in_flash_func(captureFrame)(const CaptureSetup &S,
     // the ring end needs the mask on every sample.
     uint8_t *Out = OutLines[Row];
     const uint16_t *Map = XMap;
-    bool Merge = RowMerge[Line];
+    bool Merge = RowFlags[Line] & RowMerge;
     if ((Start & Mask) + S.Samples > RingBytes) {
       for (uint32_t X = 0; X != HVisible; ++X) {
         uint8_t C = ColorLUT[Ring[(Start + Map[X]) & Mask]];
@@ -521,7 +521,7 @@ static bool __no_inline_not_in_flash_func(captureFrame)(const CaptureSetup &S,
       for (uint32_t W = 0; W != HVisible / 4; ++W)
         To[W] = From[W];
     }
-    if (RowLast[Line])
+    if (RowFlags[Line] & RowLast)
       for (uint32_t R = Row; R < End; ++R)
         applyMasks(R, OutLines[R]);
   }
