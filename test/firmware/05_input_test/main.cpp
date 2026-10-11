@@ -194,6 +194,13 @@ static constexpr uint32_t SamplesPerLine = HVisible;
 // Samples cover this share of a line, starting at the end of HSync.
 static constexpr float SampledShare = 0.8f;
 
+// Capture statistics, written by core 1, read and reset by core 0.
+enum class CaptureFail : uint32_t { None, NoVSync, VSyncEnd, Line };
+static volatile uint32_t FramesOk = 0;
+static volatile uint32_t FramesFailed = 0;
+static volatile CaptureFail LastFail = CaptureFail::None;
+static volatile uint32_t LastFailLine = 0;
+
 static uint8_t Captured[Rows][SamplesPerLine] __attribute__((aligned(4)));
 static uint8_t DiscardLine[SamplesPerLine] __attribute__((aligned(4)));
 static uint8_t ColorLUT[256];
@@ -260,16 +267,20 @@ static bool __not_in_flash_func(captureFrame)(const CaptureSetup &S) {
   uint64_t Deadline = time_us_64() + 100000;
   // Wait for the VSync pulse, restart the capture, start at its end.
   if (!waitPin(TTL_VSYNC_GPIO, !S.PosVSync, Deadline) ||
-      !waitPin(TTL_VSYNC_GPIO, S.PosVSync, Deadline))
+      !waitPin(TTL_VSYNC_GPIO, S.PosVSync, Deadline)) {
+    LastFail = CaptureFail::NoVSync;
     return false;
+  }
   pio_sm_set_enabled(CapPio, CapSM, false);
   pio_sm_clear_fifos(CapPio, CapSM);
   pio_sm_restart(CapPio, CapSM);
   pio_sm_exec(CapPio, CapSM,
               pio_encode_jmp(S.PosHSync ? PosOffset : NegOffset));
   pio_sm_put(CapPio, CapSM, SamplesPerLine - 1);
-  if (!waitPin(TTL_VSYNC_GPIO, !S.PosVSync, Deadline))
+  if (!waitPin(TTL_VSYNC_GPIO, !S.PosVSync, Deadline)) {
+    LastFail = CaptureFail::VSyncEnd;
     return false;
+  }
   pio_sm_set_enabled(CapPio, CapSM, true);
 
   uint32_t LastRow = ~0u;
@@ -284,6 +295,8 @@ static bool __not_in_flash_func(captureFrame)(const CaptureSetup &S) {
       if (time_us_64() > LineDeadline) {
         dma_channel_abort(CapChan);
         pio_sm_set_enabled(CapPio, CapSM, false);
+        LastFail = CaptureFail::Line;
+        LastFailLine = Line;
         return false;
       }
   }
@@ -322,12 +335,19 @@ static void core1Main() {
   while (true) {
     if (SeenSeq != SetupSeq) {
       SeenSeq = SetupSeq;
+      __dmb();
       S = Setup;
       buildLUT(S.Src);
       if (S.Src != Source::None)
         startCapture(S);
     }
     bool HavePicture = S.Src != Source::None && captureFrame(S);
+    if (S.Src != Source::None) {
+      if (HavePicture)
+        FramesOk = FramesOk + 1;
+      else
+        FramesFailed = FramesFailed + 1;
+    }
     showFrame(HavePicture);
     if (!HavePicture)
       sleep_ms(20);
@@ -505,6 +525,7 @@ static void update(const Measurement &M) {
                  std::fabs(New.HHz - Setup.HHz) > Setup.HHz * 0.002f;
   if (Changed) {
     Setup = New;
+    __dmb();
     SetupSeq = SetupSeq + 1;
   }
 
@@ -528,6 +549,15 @@ static void update(const Measurement &M) {
     Line(4, "Lines per frame: %.1f", M.H.Hz / M.V.Hz);
   Line(5, "Mode: %s", Mode ? Mode : "NO SIGNAL");
   Line(6, "Picture: %s", sourceName(Src));
+  uint32_t Ok = FramesOk, Failed = FramesFailed;
+  FramesOk = 0;
+  FramesFailed = 0;
+  static const char *FailNames[] = {"-", "no VSync", "VSync end", "line"};
+  if (Failed)
+    Line(13, "Frames: %lu ok %lu bad (%s %lu)", Ok, Failed,
+         FailNames[(uint32_t)LastFail], LastFailLine);
+  else
+    Line(13, "Frames: %lu ok", Ok);
 
   char States[16];
   Line(8, "Pins: * toggles + high - low");
