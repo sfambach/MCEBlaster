@@ -502,7 +502,10 @@ static void core1Main() {
         configCapture(S);
     }
     static uint32_t FrameCount = 0;
-    bool Detect = ++FrameCount % DetectEvery == 0;
+    // A known mode keeps the table's window: detection on a 760-sample line
+    // can fall behind the capture, read overwritten ring lines and grow the
+    // window to everything.
+    bool Detect = !(S.Width && S.Height) && ++FrameCount % DetectEvery == 0;
     bool HavePicture = S.Src != Source::None && captureFrame(S, Detect);
     if (S.Src != Source::None) {
       if (HavePicture)
