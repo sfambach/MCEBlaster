@@ -20,9 +20,9 @@ make -j
 
 Copy `VGAComic.uf2` to the Pico (BOOTSEL). Flash the normal MCE Blaster firmware again afterwards.
 
-## Use your own picture
+## Add a nice picture
 
-`Picture.h` is generated from `Comic.png`, do not edit it by hand. To show your own picture:
+`Picture.h` is generated from `Comic.png`, do not edit it by hand. To show a nice picture of your own:
 
 1. Install Python 3 with Pillow (`pip install pillow`) and the pico-sdk.
 2. Convert the picture; any size and format works, it is cropped to 4:3 around the centre and scaled to 400x300:
