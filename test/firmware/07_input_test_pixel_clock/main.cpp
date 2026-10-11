@@ -251,6 +251,9 @@ struct CaptureSetup {
   bool PosVSync = true;
   uint32_t LinesPerFrame = 0;
   float PixelHz = 0;
+  // Per line: skip SkipPx pixels after HSync, then take Samples pixels, of
+  // which VisiblePx after the margin are scaled to the 640 output pixels.
+  uint32_t SkipPx = 0, Samples = 0, VisiblePx = 0;
 };
 // Written by core 0, read by core 1. A torn read only costs one bad frame.
 static volatile uint32_t SetupSeq = 0;
@@ -258,10 +261,13 @@ static CaptureSetup Setup;
 // AUTO ADJUST shifts the sampling point by half an input pixel.
 static volatile uint32_t Phase = 0;
 
-// Samples per line from the end of HSync: back porch plus up to 720 visible
-// pixels. The middle 640 are shown.
-static constexpr uint32_t SamplesPerLine = 768;
-static constexpr uint32_t CropX = (SamplesPerLine - HVisible) / 2;
+// Pixels sampled before and after the visible part, so a slightly wrong
+// back porch does not cut the picture.
+static constexpr uint32_t MarginPx = 8;
+static constexpr uint32_t MaxSamples = 768;
+// Input pixel for each output pixel. 720 to 640 drops every ninth pixel,
+// which in VGA text is the empty ninth column of a character cell.
+static uint16_t XMap[HVisible];
 
 enum class CaptureFail : uint32_t { None, NoVSync, VSyncEnd, Line };
 static volatile uint32_t FramesOk = 0;
@@ -269,13 +275,17 @@ static volatile uint32_t FramesFailed = 0;
 static volatile CaptureFail LastFail = CaptureFail::None;
 static volatile uint32_t LastFailLine = 0;
 
-// Two line buffers: DMA fills one while core 1 converts the other.
-static uint8_t LineBuf[2][SamplesPerLine] __attribute__((aligned(4)));
+// One DMA channel writes the whole frame into a ring buffer. The DMA write
+// ring wraps the address in hardware, so a capture that runs ahead of core 1
+// can only overwrite old samples, never other memory.
+static constexpr uint32_t RingBits = 13; // 8 KB, ten lines
+static constexpr uint32_t RingBytes = 1u << RingBits;
+static uint8_t Ring[RingBytes] __attribute__((aligned(RingBytes)));
 static uint8_t ColorLUT[256];
 
 static PIO CapPio = pio1;
 static uint CapSM;
-static int CapChan[2];
+static int CapChan;
 static uint PosOffset, NegOffset;
 
 static void buildLUT(Source Src) {
@@ -331,23 +341,7 @@ static bool __not_in_flash_func(waitPin)(uint32_t GPIO, bool Level,
 
 static void __not_in_flash_func(stopCapture)() {
   pio_sm_set_enabled(CapPio, CapSM, false);
-  for (int Ch : CapChan) {
-    // Unchain first so the aborted channel does not start the other one.
-    hw_clear_bits(&dma_hw->ch[Ch].al1_ctrl, DMA_CH0_CTRL_TRIG_CHAIN_TO_BITS);
-    hw_set_bits(&dma_hw->ch[Ch].al1_ctrl,
-                (uint32_t)Ch << DMA_CH0_CTRL_TRIG_CHAIN_TO_LSB);
-  }
-  for (int Ch : CapChan)
-    dma_channel_abort(Ch);
-  dma_hw->intr = 1u << CapChan[0] | 1u << CapChan[1];
-}
-
-static void __not_in_flash_func(armChannel)(uint32_t I) {
-  int Ch = CapChan[I];
-  dma_channel_config Conf = dma_get_channel_config(Ch);
-  channel_config_set_chain_to(&Conf, CapChan[I ^ 1]);
-  dma_channel_configure(Ch, &Conf, LineBuf[I], &CapPio->rxf[CapSM],
-                        SamplesPerLine / 4, /*trigger=*/false);
+  dma_channel_abort(CapChan);
 }
 
 /// Captures one frame straight into the output lines. \returns false
@@ -365,65 +359,65 @@ static bool __not_in_flash_func(captureFrame)(const CaptureSetup &S) {
   pio_sm_restart(CapPio, CapSM);
   pio_sm_exec(CapPio, CapSM, pio_encode_jmp(Offset));
   // First the phase delay, then the sample count (see InputCapture.pio).
-  pio_sm_put(CapPio, CapSM, Phase);
-  pio_sm_put(CapPio, CapSM, SamplesPerLine - 1);
-  armChannel(0);
-  armChannel(1);
-  dma_hw->intr = 1u << CapChan[0] | 1u << CapChan[1];
+  // The delay loop takes one SM cycle, half a pixel, per count.
+  pio_sm_put(CapPio, CapSM, 2 * S.SkipPx + Phase);
+  pio_sm_put(CapPio, CapSM, S.Samples - 1);
+  uint32_t WordsPerLine = S.Samples / 4;
+  uint32_t Words = S.LinesPerFrame * WordsPerLine;
+  dma_channel_set_write_addr(CapChan, Ring, false);
+  dma_channel_set_trans_count(CapChan, Words, false);
   if (!waitPin(TTL_VSYNC_GPIO, !S.PosVSync, Deadline)) {
     LastFail = CaptureFail::VSyncEnd;
     return false;
   }
   stage(1, StageCapLines);
-  dma_channel_start(CapChan[0]);
+  dma_channel_start(CapChan);
   pio_sm_set_enabled(CapPio, CapSM, true);
 
   uint32_t LastRow = ~0u;
   for (uint32_t Line = 0; Line != S.LinesPerFrame; ++Line) {
-    uint32_t I = Line & 1;
-    uint32_t Done = 1u << CapChan[I];
+    uint32_t Needed = (Line + 1) * WordsPerLine;
     uint64_t LineDeadline = time_us_64() + 1000;
-    while (!(dma_hw->intr & Done))
+    while (Words - dma_channel_hw_addr(CapChan)->transfer_count < Needed)
       if (time_us_64() > LineDeadline) {
         stopCapture();
         LastFail = CaptureFail::Line;
         LastFailLine = Line;
         return false;
       }
-    dma_hw->intr = Done;
-    // The other channel is running now; rewind this one for the line after.
-    dma_channel_set_write_addr(CapChan[I], LineBuf[I], /*trigger=*/false);
-    dma_channel_set_trans_count(CapChan[I], SamplesPerLine / 4, false);
 
     uint32_t Row = Line * Rows / S.LinesPerFrame;
     if (Row == LastRow)
       continue;
     LastRow = Row;
     uint8_t *Out = OutLines[Row];
-    const uint8_t *In = LineBuf[I] + CropX;
+    uint32_t Start = Line * S.Samples;
     for (uint32_t X = 0; X != HVisible; ++X)
-      Out[X] = ColorLUT[In[X]];
+      Out[X] = ColorLUT[Ring[(Start + XMap[X]) & (RingBytes - 1)]];
     applyMasks(Row, Out);
   }
   stopCapture();
   return true;
 }
 
+// Core 1 gets its own stack in main RAM. Its default stack lies directly
+// below core 0's, so a deep printf on core 0 could overwrite it.
+static uint32_t Core1Stack[1024];
+
 static void core1Main() {
   CapSM = pio_claim_unused_sm(CapPio, true);
   PosOffset = pio_add_program(CapPio, &CapturePosHSync_program);
   NegOffset = pio_add_program(CapPio, &CaptureNegHSync_program);
-  for (int &Ch : CapChan) {
-    Ch = dma_claim_unused_channel(true);
-    dma_channel_config Conf = dma_channel_get_default_config(Ch);
-    channel_config_set_transfer_data_size(&Conf, DMA_SIZE_32);
-    channel_config_set_read_increment(&Conf, false);
-    channel_config_set_write_increment(&Conf, true);
-    channel_config_set_high_priority(&Conf, true);
-    channel_config_set_dreq(&Conf,
-                            pio_get_dreq(CapPio, CapSM, /*is_tx=*/false));
-    dma_channel_set_config(Ch, &Conf, false);
-  }
+  CapChan = dma_claim_unused_channel(true);
+  dma_channel_config Conf = dma_channel_get_default_config(CapChan);
+  channel_config_set_transfer_data_size(&Conf, DMA_SIZE_32);
+  channel_config_set_read_increment(&Conf, false);
+  channel_config_set_write_increment(&Conf, true);
+  channel_config_set_ring(&Conf, /*write=*/true, RingBits);
+  channel_config_set_high_priority(&Conf, true);
+  channel_config_set_dreq(&Conf, pio_get_dreq(CapPio, CapSM, /*is_tx=*/false));
+  dma_channel_configure(CapChan, &Conf, Ring, &CapPio->rxf[CapSM], 0,
+                        /*trigger=*/false);
 
   uint32_t SeenSeq = ~0u;
   uint32_t SeenShown = ~0u;
@@ -439,6 +433,8 @@ static void core1Main() {
       __dmb();
       S = Setup;
       buildLUT(S.Src);
+      for (uint32_t X = 0; X != HVisible; ++X)
+        XMap[X] = MarginPx + X * S.VisiblePx / HVisible;
       if (S.Src != Source::None)
         configCapture(S);
     }
@@ -574,19 +570,23 @@ struct TTLMode {
   const char *Name;
   float HHz, VHz;
   float PixelHz; // the card's usual pixel clock
+  // Pixels from the end of HSync to the picture, and picture width; 0 when
+  // not known, then most of the line is shown.
+  uint32_t BackPorchPx, VisiblePx;
 };
 // MDA/CGA/EGA from the MCE Blaster's TimingsTTL.def. CGA and EGA 200 lines
 // share one timing. The VGA modes are not supported by the MCE Blaster; they
 // are listed because VGA cards with a 9-pin TTL output send them.
 static constexpr TTLMode TTLModes[] = {
-    {"MDA 720x350 50Hz", 18430, 50, 16257000},
-    {"CGA/EGA 640x200 60Hz", 15700, 60, 14318181.0f},
-    {"EGA 640x350 60Hz", 21850, 60, 16257000},
-    {"VGA 720x400 70Hz", 31469, 70, 28322000},
-    {"VGA 640x480 60Hz", 31469, 60, 25175000},
+    // Porches from the standard CRTC values (MDA, CGA) and VESA timings.
+    {"MDA 720x350 50Hz", 18430, 50, 16257000, 9, 720},
+    {"CGA/EGA 640x200 60Hz", 15700, 60, 14318181.0f, 112, 640},
+    {"EGA 640x350 60Hz", 21850, 60, 16257000, 0, 0},
+    {"VGA 720x400 70Hz", 31469, 70, 28322000, 54, 720},
+    {"VGA 640x480 60Hz", 31469, 60, 25175000, 48, 640},
     // Measured on a Trident TVGA 9-pin output in its non-VGA switch setting;
     // the pixel clock is unknown, so it is measured only.
-    {"TVGA 200 lines 117Hz", 31055, 117.6f, 0},
+    {"TVGA 200 lines 117Hz", 31055, 117.6f, 0, 0, 0},
 };
 
 static const char *guessMode(const Measurement &M) {
@@ -975,10 +975,31 @@ static void update(const Measurement &M) {
   New.PixelHz = Clock.Hz;
   New.LinesPerFrame =
       Latch.Valid ? (uint32_t)std::lround(Latch.HHz / Latch.VHz) : 0;
+  const TTLMode *Mode = nullptr;
+  for (const TTLMode &T : TTLModes)
+    if (T.Name == Latch.Mode)
+      Mode = &T;
+  if (Mode && Mode->VisiblePx) {
+    New.SkipPx = Mode->BackPorchPx > MarginPx ? Mode->BackPorchPx - MarginPx : 0;
+    New.VisiblePx = Mode->VisiblePx;
+  } else {
+    // Unknown timing: four fifths of the line, which stays clear of the next
+    // HSync in every mode.
+    New.VisiblePx = Clock.PixelsPerLine * 4 / 5 - 2 * MarginPx;
+  }
+  New.Samples = (New.VisiblePx + 2 * MarginPx + 3) / 4 * 4;
+  if (New.Samples > MaxSamples) {
+    New.Samples = MaxSamples;
+    New.VisiblePx = MaxSamples - 2 * MarginPx;
+  }
+  if (New.Samples < 4 * MarginPx)
+    New.Src = Source::None;
   bool Changed = New.Src != Setup.Src || New.PosHSync != Setup.PosHSync ||
                  New.PosVSync != Setup.PosVSync ||
                  New.LinesPerFrame != Setup.LinesPerFrame ||
-                 New.PixelHz != Setup.PixelHz;
+                 New.PixelHz != Setup.PixelHz || New.SkipPx != Setup.SkipPx ||
+                 New.Samples != Setup.Samples ||
+                 New.VisiblePx != Setup.VisiblePx;
   if (Changed) {
     Setup = New;
     __dmb();
@@ -987,7 +1008,9 @@ static void update(const Measurement &M) {
 
   stage(0, StageOverlay);
   Overlay &O = Overlays[!Shown];
-  O = Overlay();
+  // Cleared in place: a temporary Overlay would cost core 0 600 bytes of its
+  // small stack.
+  std::memset(&O, 0, sizeof(O));
   auto Line = [&O](uint32_t L, const char *Fmt, auto... Args) {
     std::snprintf(O.Lines[L], sizeof(O.Lines[L]), Fmt, Args...);
   };
@@ -1069,7 +1092,7 @@ int main() {
   startVGA();
   initInputs();
   initFastSample();
-  multicore_launch_core1(core1Main);
+  multicore_launch_core1_with_stack(core1Main, Core1Stack, sizeof(Core1Stack));
 
 #ifdef PICO_DEFAULT_LED_PIN
   gpio_init(PICO_DEFAULT_LED_PIN);
