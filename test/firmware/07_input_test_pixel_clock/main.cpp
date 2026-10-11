@@ -584,6 +584,9 @@ static constexpr TTLMode TTLModes[] = {
     {"EGA 640x350 60Hz", 21850, 60, 16257000},
     {"VGA 720x400 70Hz", 31469, 70, 28322000},
     {"VGA 640x480 60Hz", 31469, 60, 25175000},
+    // Measured on a Trident TVGA 9-pin output in its non-VGA switch setting;
+    // the pixel clock is unknown, so it is measured only.
+    {"TVGA 200 lines 117Hz", 31055, 117.6f, 0},
 };
 
 static const char *guessMode(const Measurement &M) {
@@ -591,7 +594,7 @@ static const char *guessMode(const Measurement &M) {
     return nullptr;
   for (const TTLMode &Mode : TTLModes)
     if (std::fabs(M.H.Hz - Mode.HHz) < Mode.HHz * 0.03f &&
-        std::fabs(M.V.Hz - Mode.VHz) < 3)
+        std::fabs(M.V.Hz - Mode.VHz) < 3.0f)
       return Mode.Name;
   return "unknown";
 }
