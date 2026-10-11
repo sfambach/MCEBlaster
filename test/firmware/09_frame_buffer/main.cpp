@@ -128,10 +128,12 @@ static void __not_in_flash_func(fillLine)(uint32_t Y, uint8_t *Out) {
     uint32_t Left = OutLeft;
     for (uint32_t X = 0; X < Left; X += 2)
       reinterpret_cast<uint16_t *>(Out)[X / 2] = (uint16_t)BlackWord;
+    // Two frame buffer bytes, four pixels, per 32-bit store. Left and Width
+    // are multiples of 4 and 2.
     const uint8_t *Src = Fb[Rel >> OutShift];
-    uint16_t *Dst = reinterpret_cast<uint16_t *>(Out + Left);
-    for (uint32_t I = 0; I != Width / 2; ++I)
-      Dst[I] = PairLUT[Src[I]];
+    uint32_t *Dst = reinterpret_cast<uint32_t *>(Out + Left);
+    for (uint32_t I = 0; I != Width / 4; ++I)
+      Dst[I] = PairLUT[Src[2 * I]] | (uint32_t)PairLUT[Src[2 * I + 1]] << 16;
     for (uint32_t X = Left + Width; X < HVisible; X += 2)
       reinterpret_cast<uint16_t *>(Out)[X / 2] = (uint16_t)BlackWord;
   }
@@ -276,18 +278,17 @@ static void __not_in_flash_func(applyMasks)(uint32_t Row, uint8_t *Out) {
   uint32_t Y = Row - MaskY;
   // The title line is yellow.
   uint8_t Color = ((Y < TxtRowHeight + 1) ? Yellow : White) | Idle;
+  // Two screen pixels per font pixel: one 16-bit store each. M.X is even.
+  const uint16_t Glyph = Color * 0x0101u, Outline = (Black | Idle) * 0x0101u;
   const uint8_t *T = M.Text[Y], *E = M.Edge[Y];
-  uint8_t *P = Out + M.X;
-  for (uint32_t B = 0; B != MaskBytes; ++B, P += 16) {
-    uint32_t Any = T[B] | E[B];
+  uint16_t *P = reinterpret_cast<uint16_t *>(Out + M.X);
+  for (uint32_t B = 0; B != MaskBytes; ++B, P += 8) {
+    uint32_t Tb = T[B], Any = Tb | E[B];
     if (!Any)
       continue;
-    for (uint32_t I = 0; I != 8; ++I) {
-      if (!(Any & (1u << I)))
-        continue;
-      uint8_t C = (T[B] & (1u << I)) ? Color : (Black | Idle);
-      P[2 * I] = P[2 * I + 1] = C;
-    }
+    for (uint32_t I = 0; I != 8; ++I, Tb >>= 1, Any >>= 1)
+      if (Any & 1)
+        P[I] = (Tb & 1) ? Glyph : Outline;
   }
 }
 
@@ -357,7 +358,7 @@ static void placePicture() {
   __dmb();
   OutShift = Shift;
   OutTop = (VVisible - (Lines << Shift)) / 2;
-  OutLeft = ((HVisible - Width) / 2) & ~1u;
+  OutLeft = ((HVisible - Width) / 2) & ~3u;
   PicLines = Lines;
   __dmb();
   PicWidth = Width;
