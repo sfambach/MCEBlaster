@@ -312,6 +312,9 @@ static volatile CaptureFail LastFail = CaptureFail::None;
 static volatile uint32_t LastFailLine = 0;
 // Most lines core 1 fell behind the capture since the last overlay update.
 static volatile uint32_t MaxLag = 0;
+// Frames in which the capture SM had to wait for the DMA, which stretches
+// the sampling of a line.
+static volatile uint32_t StalledFrames = 0;
 
 // One DMA channel writes the whole frame into a ring buffer. The DMA write
 // ring wraps the address in hardware, so a capture that runs ahead of core 1
@@ -415,6 +418,7 @@ static bool __not_in_flash_func(captureFrame)(const CaptureSetup &S,
   }
   stage(1, StageCapLines);
   dma_channel_start(CapChan);
+  CapPio->fdebug = 1u << (PIO_FDEBUG_RXSTALL_LSB + CapSM);
   pio_sm_set_enabled(CapPio, CapSM, true);
 
   uint32_t FoundLeft = ~0u, FoundRight = 0, FoundTop = ~0u, FoundBottom = 0;
@@ -486,6 +490,8 @@ static bool __not_in_flash_func(captureFrame)(const CaptureSetup &S,
     WinBottom = First || FoundBottom > WinBottom ? FoundBottom : WinBottom;
     buildXMap();
   }
+  if (CapPio->fdebug & (1u << (PIO_FDEBUG_RXSTALL_LSB + CapSM)))
+    StalledFrames = StalledFrames + 1;
   stopCapture();
   return true;
 }
@@ -1181,13 +1187,14 @@ static void update(const Measurement &M) {
   FramesFailed = 0;
   static const char *FailNames[] = {"-", "no VSync", "VSync end", "line",
                                     "late"};
-  uint32_t Lag = MaxLag;
+  uint32_t Lag = MaxLag, Stalled = StalledFrames;
   MaxLag = 0;
+  StalledFrames = 0;
   if (Failed)
     Line(13, "Frames: %lu ok %lu bad (%s %lu), lag %lu", Ok, Failed,
          FailNames[(uint32_t)LastFail], LastFailLine, Lag);
   else
-    Line(13, "Frames: %lu ok, lag %lu lines", Ok, Lag);
+    Line(13, "Frames: %lu ok, lag %lu, stall %lu", Ok, Lag, Stalled);
   if (WatchdogReset && (ResetStage[0] || ResetStage[1]))
     Line(14, "Hang reset: core0 %lu core1 %lu", ResetStage[0], ResetStage[1]);
   Line(15, "PIXEL CLOCK: hide text");
