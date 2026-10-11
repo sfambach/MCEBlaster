@@ -1069,7 +1069,8 @@ static void update(const Measurement &M) {
   auto Line = [&O](uint32_t L, const char *Fmt, auto... Args) {
     std::snprintf(O.Lines[L], sizeof(O.Lines[L]), Fmt, Args...);
   };
-  Line(0, "MCE BLASTER - INPUT TEST");
+  // The build time tells which firmware is on the Pico.
+  Line(0, "MCE BLASTER INPUT TEST  build %.5s", __TIME__);
   if (M.H.Hz >= 1000)
     Line(2, "HSync %7.3f kHz %s %5.2f us", M.H.Hz / 1000.0f,
          M.H.positive() ? "pos" : "neg", M.H.pulseUs());

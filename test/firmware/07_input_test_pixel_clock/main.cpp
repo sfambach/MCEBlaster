@@ -1167,7 +1167,8 @@ static void update(const Measurement &M) {
   auto Line = [&O](uint32_t L, const char *Fmt, auto... Args) {
     std::snprintf(O.Lines[L], sizeof(O.Lines[L]), Fmt, Args...);
   };
-  Line(0, "MCE BLASTER - INPUT TEST");
+  // The build time tells which firmware is on the Pico.
+  Line(0, "MCE BLASTER INPUT TEST  build %.5s", __TIME__);
   if (M.H.Hz >= 1000)
     Line(2, "HSync %7.3f kHz %s %5.2f us", M.H.Hz / 1000.0f,
          M.H.positive() ? "pos" : "neg", M.H.pulseUs());
@@ -1216,7 +1217,7 @@ static void update(const Measurement &M) {
   Lag /= Setup.Samples >= 4 ? Setup.Samples / 4 : 1;
   StalledFrames = 0;
   if (Failed)
-    Line(13, "Frames: %lu ok %lu bad (%s %lu), lag %lu", Ok, Failed,
+    Line(13, "Frames: %lu ok %lu bad (%s %lu) lag %lu", Ok, Failed,
          FailNames[(uint32_t)LastFail], LastFailLine, Lag);
   else
     Line(13, "Frames: %lu ok, lag %lu, stall %lu", Ok, Lag, Stalled);
