@@ -1,6 +1,6 @@
 Required Notice: Copyright (C) 2026 Stefan Fambach (SteFam), https://www.fambach.net
 
-This folder (test/firmware/vga-testbild) is licensed under the PolyForm
+This folder (test/firmware/01_vga_testimage) is licensed under the PolyForm
 Noncommercial License 1.0.0 below: free to use, change and share for any
 noncommercial purpose. Commercial use needs the prior written consent of
 Stefan Fambach; ask via https://www.fambach.net.

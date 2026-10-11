@@ -7,8 +7,8 @@
 // VGA test picture for the MCE Blaster: a white frame along the edge of the
 // visible area and the VGA resolution, line and frame frequency as text.
 // No TTL input is used, this only tests the VGA side (Pico, DAC, cable,
-// monitor). With BUTTONS defined, PIXEL CLOCK selects the next and AUTO ADJUST
-// the previous mode; otherwise the picture stays in VGA_MODE.
+// monitor). Step 2: PIXEL CLOCK selects the next and AUTO ADJUST the previous
+// VGA mode.
 //
 
 #include "Font8x8.h"
@@ -21,9 +21,8 @@
 #include <cstring>
 #include <initializer_list>
 
-#ifndef VGA_MODE
-#define VGA_MODE 1
-#endif
+// Start in 640x480.
+static constexpr uint32_t StartMode = 1;
 
 // Same pins as the MCE Blaster firmware (Common.h): GPIO 14-19 RRGGBB,
 // GPIO 20 HSync, GPIO 21 VSync.
@@ -66,8 +65,8 @@ static constexpr VGATiming Timings[] = {
      7},
 };
 static constexpr uint32_t NumModes = sizeof(Timings) / sizeof(Timings[0]);
-static uint32_t Mode = VGA_MODE;
-static const VGATiming *TP = &Timings[VGA_MODE];
+static uint32_t Mode = StartMode;
+static const VGATiming *TP = &Timings[StartMode];
 #define T (*TP)
 
 static constexpr uint32_t MaxHTotal = 1024;
@@ -137,13 +136,8 @@ static void buildFrame() {
   std::snprintf(Txt[3], sizeof(Txt[3]), "Pixel clock: %.3f MHz",
                 T.pixelClkHz() / 1000000.0f);
   Txt[4][0] = '\0';
-#ifdef BUTTONS
   std::snprintf(Txt[5], sizeof(Txt[5]), "Mode %lu/%lu", Mode + 1, NumModes);
   std::snprintf(Txt[6], sizeof(Txt[6]), "< AUTO ADJUST   PIXEL CLOCK >");
-#else
-  Txt[5][0] = '\0';
-  Txt[6][0] = '\0';
-#endif
   std::snprintf(Txt[7], sizeof(Txt[7]), "Thanks to Scrap Computing");
   std::snprintf(Txt[8], sizeof(Txt[8]), "Greetings SteFam");
 
@@ -226,7 +220,6 @@ static void startVGA() {
   dma_channel_start(CtrlChan);
 }
 
-#ifdef BUTTONS
 /// Stops the output, rebuilds the frame for \p NewMode and restarts it.
 static void switchMode(uint32_t NewMode) {
   irq_set_enabled(DMA_IRQ_0, false);
@@ -275,7 +268,6 @@ struct Button {
     return Down;
   }
 };
-#endif
 
 static void printStatus() {
   std::printf("VGA test: %s %.2f Hz, H %.3f kHz, pixel clock %.3f MHz\n",
@@ -292,7 +284,6 @@ int main() {
   gpio_init(PICO_DEFAULT_LED_PIN);
   gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);
 #endif
-#ifdef BUTTONS
   Button Next{NEXT_BTN_GPIO};
   Button Prev{PREV_BTN_GPIO};
   for (Button *B : {&Next, &Prev}) {
@@ -300,10 +291,8 @@ int main() {
     gpio_set_dir(B->GPIO, GPIO_IN);
     gpio_pull_up(B->GPIO);
   }
-#endif
   absolute_time_t NextStatus = get_absolute_time();
   while (true) {
-#ifdef BUTTONS
     if (Next.poll()) {
       switchMode((Mode + 1) % NumModes);
       printStatus();
@@ -312,7 +301,6 @@ int main() {
       switchMode((Mode + NumModes - 1) % NumModes);
       printStatus();
     }
-#endif
     if (absolute_time_diff_us(NextStatus, get_absolute_time()) >= 0) {
       NextStatus = make_timeout_time_ms(2000);
 #ifdef PICO_DEFAULT_LED_PIN

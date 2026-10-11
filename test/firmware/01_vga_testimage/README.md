@@ -1,6 +1,6 @@
-# VGA test picture
+# Step 1: VGA test image
 
-Static test picture for the MCE Blaster's VGA output. It does not read the TTL input, so it only checks the VGA side: Pico, resistor DAC, VGA connector, cable and monitor.
+Static test image for the MCE Blaster's VGA output. It does not read the TTL input, so it only checks the VGA side: Pico, resistor DAC, VGA connector, cable and monitor.
 
 The picture shows:
 - a white frame (2 pixels) along the edge of the visible area. All four sides must be visible and straight.
@@ -12,13 +12,11 @@ The same values are printed once every 2 seconds over USB serial (e.g. `cat /dev
 
 | UF2 | Mode | H | V | Pixel clock |
 |---|---|---|---|---|
-| `VGATestbild_640x400.uf2` | 640x400, HSync −, VSync + | 31.500 kHz | 70.16 Hz | 25.2 MHz |
-| `VGATestbild_640x480.uf2` | 640x480, HSync −, VSync − | 31.500 kHz | 60.00 Hz | 25.2 MHz |
-| `VGATestbild_800x600.uf2` | 800x600, HSync +, VSync + | 35.156 kHz | 56.25 Hz | 36.0 MHz |
+| `VGATestImage_640x400.uf2` | 640x400, HSync −, VSync + | 31.500 kHz | 70.16 Hz | 25.2 MHz |
+| `VGATestImage_640x480.uf2` | 640x480, HSync −, VSync − | 31.500 kHz | 60.00 Hz | 25.2 MHz |
+| `VGATestImage_800x600.uf2` | 800x600, HSync +, VSync + | 35.156 kHz | 56.25 Hz | 36.0 MHz |
 
-| `VGATestbild_Modes.uf2` | all three, switched with the buttons (starts in 640x480) | | | |
-
-These are the three modes the MCE Blaster outputs. In `VGATestbild_Modes.uf2` the PIXEL CLOCK button selects the next mode and AUTO ADJUST the previous one; the picture shows the mode number and the button hint. The Pico runs at 252 MHz so that both pixel clocks are an integer divider (/10 and /7); 25.2 MHz is within the tolerance of the 25.175 MHz VGA standard.
+These are the three modes the MCE Blaster outputs. The Pico runs at 252 MHz so that both pixel clocks are an integer divider (/10 and /7); 25.2 MHz is within the tolerance of the 25.175 MHz VGA standard.
 
 ## Build
 
