@@ -30,6 +30,7 @@ static constexpr uint32_t TTL_VSYNC_GPIO = 6;
 static constexpr uint32_t TTL_HSYNC_GPIO = 7;
 static constexpr uint32_t CGA_RGB_GPIO = 8;  // 8-13
 static constexpr uint32_t MDA_VI_GPIO = 26;  // 26 V, 27 I
+static constexpr uint32_t PIXEL_CLOCK_BTN_GPIO = 22;
 
 static constexpr uint8_t Black = 0b000000;
 static constexpr uint8_t Gray = 0b101010;
@@ -137,7 +138,6 @@ static void startVGA() {
 static constexpr uint32_t NumTxtLines = 15;
 static constexpr uint32_t MaxChars = 36;
 static constexpr uint32_t TxtRowHeight = FontHeight + 2;
-static constexpr uint32_t TxtPad = 4;
 
 struct Overlay {
   char Lines[NumTxtLines][MaxChars + 1] = {};
@@ -147,30 +147,59 @@ struct Overlay {
 static Overlay Overlays[2];
 static volatile uint32_t Shown = 0;
 
-/// Copies the background row and draws the overlay on top of it.
+// The PIXEL CLOCK button hides and shows the text.
+static volatile bool OverlayOn = true;
+
+/// Draws the overlay on top of a background row. The text has a black
+/// outline instead of a box, so the input picture stays visible around it.
 static void __not_in_flash_func(drawOverlayRow)(const Overlay &O, uint32_t Row,
                                                 uint8_t *Out) {
-  uint32_t BoxW = O.Width * FontWidth + 2 * TxtPad;
-  uint32_t BoxH = NumTxtLines * TxtRowHeight + 2 * TxtPad;
-  uint32_t BoxX = (HVisible - BoxW) / 2;
-  uint32_t BoxY = (Rows - BoxH) / 2;
-  if (Row < BoxY || Row >= BoxY + BoxH || O.Width == 0)
+  if (!OverlayOn || O.Width == 0)
     return;
-  std::memset(Out + BoxX, Black | Idle, BoxW);
-  uint32_t Y = Row - BoxY;
-  if (Y < TxtPad)
+  uint32_t BlockW = O.Width * FontWidth;
+  uint32_t BlockH = NumTxtLines * TxtRowHeight;
+  int32_t BlockX = (HVisible - BlockW) / 2;
+  int32_t BlockY = (Rows - BlockH) / 2;
+  int32_t Y = (int32_t)Row - BlockY;
+  if (Y < -1 || Y > (int32_t)BlockH)
     return;
-  uint32_t L = (Y - TxtPad) / TxtRowHeight;
-  uint32_t FontRow = (Y - TxtPad) % TxtRowHeight;
-  if (L >= NumTxtLines || FontRow >= FontHeight)
-    return;
+  // Pixels of this row and of the rows above and below, for the outline.
+  auto RowBits = [&O](int32_t Y, uint32_t Col0) -> uint32_t {
+    if (Y < 0)
+      return 0;
+    uint32_t L = Y / TxtRowHeight, FontRow = Y % TxtRowHeight;
+    if (L >= NumTxtLines || FontRow >= FontHeight)
+      return 0;
+    // Bits Col0-1 .. Col0+8 of the line, bit 1 = column Col0.
+    uint32_t Bits = 0;
+    for (int32_t Col = (int32_t)Col0 - 1; Col <= (int32_t)Col0 + 8; ++Col) {
+      if (Col < 0)
+        continue;
+      uint32_t Char = Col / FontWidth, Bit = Col % FontWidth;
+      const char *Txt = O.Lines[L];
+      if (Char >= std::strlen(Txt))
+        continue;
+      if (Font8x8[Txt[Char] & 0x7f][FontRow] & (1u << Bit))
+        Bits |= 1u << (Col - (int32_t)Col0 + 1);
+    }
+    return Bits;
+  };
+  uint32_t L = Y >= 0 ? Y / TxtRowHeight : 0;
   uint8_t Color = (L == 0 ? Yellow : White) | Idle;
-  uint8_t *P = Out + BoxX + TxtPad;
-  for (const char *C = O.Lines[L]; *C; ++C) {
-    uint8_t Bits = Font8x8[*C & 0x7f][FontRow];
-    for (uint32_t Col = 0; Col != FontWidth; ++Col, ++P)
-      if (Bits & (1u << Col))
-        *P = Color;
+  for (uint32_t Col0 = 0; Col0 < BlockW; Col0 += 8) {
+    uint32_t Mid = RowBits(Y, Col0);
+    uint32_t Around = RowBits(Y - 1, Col0) | RowBits(Y + 1, Col0) | Mid |
+                      Mid << 1 | Mid >> 1;
+    for (uint32_t I = 0; I != 8; ++I) {
+      int32_t X = BlockX + Col0 + I;
+      if (X < 0 || X >= (int32_t)HVisible)
+        continue;
+      uint32_t Bit = 1u << (I + 1);
+      if (Mid & Bit)
+        Out[X] = Color;
+      else if (Around & Bit)
+        Out[X] = Black | Idle;
+    }
   }
 }
 
@@ -363,9 +392,17 @@ static constexpr uint32_t InputMask =
 
 static volatile uint32_t VSyncEdges = 0;
 
-static void vsyncIRQ(uint GPIO, uint32_t Events) {
-  if (GPIO == TTL_VSYNC_GPIO && (Events & GPIO_IRQ_EDGE_RISE))
+static void gpioIRQ(uint GPIO, uint32_t Events) {
+  if (GPIO == TTL_VSYNC_GPIO && (Events & GPIO_IRQ_EDGE_RISE)) {
     ++VSyncEdges;
+  } else if (GPIO == PIXEL_CLOCK_BTN_GPIO) {
+    // Debounce: ignore presses within 200 ms of the last one.
+    static uint64_t LastPress = 0;
+    uint64_t Now = time_us_64();
+    if (Now - LastPress > 200000)
+      OverlayOn = !OverlayOn;
+    LastPress = Now;
+  }
 }
 
 struct SyncResult {
@@ -405,7 +442,7 @@ static void initInputs() {
   pwm_config_set_clkdiv(&Conf, 1.0f);
   pwm_init(Slice, &Conf, false);
   gpio_set_irq_enabled_with_callback(TTL_VSYNC_GPIO, GPIO_IRQ_EDGE_RISE, true,
-                                     vsyncIRQ);
+                                     gpioIRQ);
 }
 
 /// Samples all input pins for \p Ms milliseconds and counts sync edges.
@@ -535,6 +572,7 @@ static void update(const Measurement &M) {
     std::snprintf(O.Lines[L], sizeof(O.Lines[L]), Fmt, Args...);
   };
   Line(0, "MCE BLASTER - INPUT TEST");
+  Line(14, "PIXEL CLOCK button: hide text");
   if (M.H.Hz >= 1000)
     Line(2, "HSync %7.3f kHz %s %5.2f us", M.H.Hz / 1000.0f,
          M.H.positive() ? "pos" : "neg", M.H.pulseUs());
@@ -595,6 +633,10 @@ int main() {
   gpio_init(PICO_DEFAULT_LED_PIN);
   gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);
 #endif
+  gpio_init(PIXEL_CLOCK_BTN_GPIO);
+  gpio_set_dir(PIXEL_CLOCK_BTN_GPIO, GPIO_IN);
+  gpio_pull_up(PIXEL_CLOCK_BTN_GPIO);
+  gpio_set_irq_enabled(PIXEL_CLOCK_BTN_GPIO, GPIO_IRQ_EDGE_FALL, true);
   while (true) {
     update(measure(1000));
 #ifdef PICO_DEFAULT_LED_PIN
