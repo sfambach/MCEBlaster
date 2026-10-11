@@ -205,15 +205,20 @@ static volatile uint32_t Shown = 0;
 static volatile bool OverlayOn = true;
 
 // The text is drawn into two bitmaps once per update (glyph pixels and their
-// black outline, one bit per font pixel), so core 1 can put it on top of each
-// captured line within the line time.
+// black outline, one bit per font pixel), so the output can put it on top of
+// each line within the line time. Two sets: core 1 builds the hidden one
+// while the output reads the shown one, so the text never flickers.
 static constexpr uint32_t BlockW = MaxChars * FontWidth + 2; // font pixels
 static constexpr uint32_t MaskBytes = (BlockW + 7) / 8;
 static constexpr uint32_t BlockH = NumTxtLines * TxtRowHeight + 2;
-static uint8_t TextMask[BlockH][MaskBytes];
-static uint8_t EdgeMask[BlockH][MaskBytes];
-static uint32_t MaskX = 0, MaskY = 0; // screen position of the block
-static uint32_t MaskW = 0;            // used width in font pixels
+struct Masks {
+  uint8_t Text[BlockH][MaskBytes];
+  uint8_t Edge[BlockH][MaskBytes];
+  uint32_t X = 0; // screen position of the block
+};
+static Masks MaskSets[2];
+static volatile uint32_t ShownMasks = 0;
+static constexpr uint32_t MaskY = (Rows - BlockH) / 2;
 
 static bool textPixel(const Overlay &O, int32_t Y, int32_t X) {
   if (Y < 0 || X < 0)
@@ -228,14 +233,14 @@ static bool textPixel(const Overlay &O, int32_t Y, int32_t X) {
 }
 
 static void buildMasks(const Overlay &O) {
-  std::memset(TextMask, 0, sizeof(TextMask));
-  std::memset(EdgeMask, 0, sizeof(EdgeMask));
-  MaskW = O.Width * FontWidth + 2;
+  Masks &M = MaskSets[!ShownMasks];
+  std::memset(M.Text, 0, sizeof(M.Text));
+  std::memset(M.Edge, 0, sizeof(M.Edge));
+  uint32_t Width = O.Width * FontWidth + 2; // used width in font pixels
   // Two screen pixels per font pixel horizontally, rows are shown twice.
-  MaskX = (HVisible - 2 * MaskW) / 2;
-  MaskY = (Rows - BlockH) / 2;
+  M.X = (HVisible - 2 * Width) / 2;
   for (int32_t Y = 0; Y != (int32_t)BlockH; ++Y)
-    for (int32_t X = 0; X != (int32_t)MaskW; ++X) {
+    for (int32_t X = 0; X != (int32_t)Width; ++X) {
       // Mask coordinates have a one pixel margin for the outline.
       bool Text = textPixel(O, Y - 1, X - 1);
       bool Edge = false;
@@ -243,21 +248,24 @@ static void buildMasks(const Overlay &O) {
         for (int32_t DX = -1; DX <= 1 && !Edge; ++DX)
           Edge = textPixel(O, Y - 1 + DY, X - 1 + DX);
       if (Text)
-        TextMask[Y][X / 8] |= 1u << (X % 8);
+        M.Text[Y][X / 8] |= 1u << (X % 8);
       else if (Edge)
-        EdgeMask[Y][X / 8] |= 1u << (X % 8);
+        M.Edge[Y][X / 8] |= 1u << (X % 8);
     }
+  __dmb();
+  ShownMasks = !ShownMasks;
 }
 
 /// Puts the text on top of output row \p Row.
 static void __not_in_flash_func(applyMasks)(uint32_t Row, uint8_t *Out) {
   if (!OverlayOn || Row < MaskY || Row >= MaskY + BlockH)
     return;
+  const Masks &M = MaskSets[ShownMasks];
   uint32_t Y = Row - MaskY;
   // The title line is yellow.
   uint8_t Color = ((Y < TxtRowHeight + 1) ? Yellow : White) | Idle;
-  const uint8_t *T = TextMask[Y], *E = EdgeMask[Y];
-  uint8_t *P = Out + MaskX;
+  const uint8_t *T = M.Text[Y], *E = M.Edge[Y];
+  uint8_t *P = Out + M.X;
   for (uint32_t B = 0; B != MaskBytes; ++B, P += 16) {
     uint32_t Any = T[B] | E[B];
     if (!Any)
