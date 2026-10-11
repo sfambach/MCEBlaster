@@ -20,14 +20,27 @@ make -j
 
 Copy `VGAComic.uf2` to the Pico (BOOTSEL). Flash the normal MCE Blaster firmware again afterwards.
 
-## Picture
+## Use your own picture
 
-`Picture.h` is generated, do not edit it:
+`Picture.h` is generated from `Comic.png`, do not edit it by hand. To show your own picture:
 
-```
-python3 tools/make_comic.py photo.png Comic     # optional, makes Comic.png
-python3 tools/png2header.py Comic.png Picture.h
-```
+1. Install Python 3 with Pillow (`pip install pillow`) and the pico-sdk.
+2. Convert the picture; any size and format works, it is cropped to 4:3 around the centre and scaled to 400x300:
+   ```
+   python3 tools/png2header.py MyPicture.jpg Picture.h
+   ```
+   For photos add `--dither`: it mixes neighbouring pixels so gradients look smoother.
+3. Check `Picture_preview.png`: that is what the monitor will show.
+4. Build as above and copy `VGAComic.uf2` to the Pico.
+
+Tips for a nice picture with only 64 colours (4 levels per colour):
+
+- Flat areas and strong outlines work best: comics, logos, pixel art, posters.
+- Without `--dither`, photos turn into a posterised comic look; skin tones and soft gradients get blotchy.
+- Put the important part in the middle, so the 4:3 crop does not cut it off.
+- Text should be at least about 10 pixels high in the 400x300 picture.
+
+`tools/make_comic.py` made `Comic.png` from the original photo (draws the suit, adds the speech bubble and the banner). It is tuned to that one photo; use it as an example, not for other pictures.
 
 ## What changed compared to step 2
 
