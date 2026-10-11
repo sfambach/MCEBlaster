@@ -6,7 +6,7 @@ Same test image as [step 1](../01_vga_testimage/) (white frame, mode, H/V freque
 - `AUTO ADJUST` button: previous mode
 - Order: 640x400 → 640x480 → 800x600 → back to 640x400. Starts in 640x480.
 
-The image also shows the mode number and the button hint. Every switch is printed over USB serial, plus a status line every 2 seconds.
+The image also shows the resolution number and which button switches to which resolution, e.g. "PIXEL CLOCK button: next (800x600)" and "AUTO ADJUST button: back (640x400)". Every switch is printed over USB serial, plus a status line every 2 seconds.
 
 This checks that the buttons work and that the monitor syncs to every mode the MCE Blaster outputs.
 

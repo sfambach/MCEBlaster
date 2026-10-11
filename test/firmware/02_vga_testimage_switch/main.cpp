@@ -73,7 +73,7 @@ static constexpr uint32_t MaxHTotal = 1024;
 static constexpr uint32_t MaxVTotal = 625;
 static constexpr uint32_t Border = 2;
 static constexpr uint32_t Zoom = 2;
-static constexpr uint32_t NumTxtLines = 9;
+static constexpr uint32_t NumTxtLines = 11;
 static constexpr uint32_t TxtLineGap = 8;
 
 // One buffer per distinct scanline; the frame is a table of line pointers.
@@ -136,10 +136,17 @@ static void buildFrame() {
   std::snprintf(Txt[3], sizeof(Txt[3]), "Pixel clock: %.3f MHz",
                 T.pixelClkHz() / 1000000.0f);
   Txt[4][0] = '\0';
-  std::snprintf(Txt[5], sizeof(Txt[5]), "Mode %lu/%lu", Mode + 1, NumModes);
-  std::snprintf(Txt[6], sizeof(Txt[6]), "< AUTO ADJUST   PIXEL CLOCK >");
-  std::snprintf(Txt[7], sizeof(Txt[7]), "Thanks to Scrap Computing");
-  std::snprintf(Txt[8], sizeof(Txt[8]), "Greetings SteFam");
+  const char *NextName = Timings[(Mode + 1) % NumModes].Name;
+  const char *PrevName = Timings[(Mode + NumModes - 1) % NumModes].Name;
+  std::snprintf(Txt[5], sizeof(Txt[5]), "Resolution %lu of %lu", Mode + 1,
+                NumModes);
+  std::snprintf(Txt[6], sizeof(Txt[6]), "PIXEL CLOCK button: next (%s)",
+                NextName);
+  std::snprintf(Txt[7], sizeof(Txt[7]), "AUTO ADJUST button: back (%s)",
+                PrevName);
+  Txt[8][0] = '\0';
+  std::snprintf(Txt[9], sizeof(Txt[9]), "Thanks to Scrap Computing");
+  std::snprintf(Txt[10], sizeof(Txt[10]), "Greetings SteFam");
 
   initLine(BlankLine, false);
   initLine(VSyncLine, true);
