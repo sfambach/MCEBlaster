@@ -391,10 +391,15 @@ static constexpr uint32_t InputMask =
     0x3fu << CGA_RGB_GPIO | 0x3u << MDA_VI_GPIO;
 
 static volatile uint32_t VSyncEdges = 0;
+// Times of the first and last edge: counting edges in 1 s alone gives only
+// whole hertz, so 70 Hz flips between 70 and 71.
+static volatile uint64_t FirstVSyncUs = 0, LastVSyncUs = 0;
 
 static void gpioIRQ(uint GPIO, uint32_t Events) {
   if (GPIO == TTL_VSYNC_GPIO && (Events & GPIO_IRQ_EDGE_RISE)) {
-    ++VSyncEdges;
+    LastVSyncUs = time_us_64();
+    if (VSyncEdges++ == 0)
+      FirstVSyncUs = LastVSyncUs;
   } else if (GPIO == PIXEL_CLOCK_BTN_GPIO) {
     // Debounce: ignore presses within 200 ms of the last one.
     static uint64_t LastPress = 0;
@@ -474,7 +479,9 @@ static Measurement measure(uint32_t Ms) {
   float Seconds = (Now - Start) / 1e6f;
 
   M.H.Hz = pwm_get_counter(Slice) / Seconds;
-  M.V.Hz = VSyncEdges / Seconds;
+  uint32_t Edges = VSyncEdges;
+  M.V.Hz = Edges >= 2 ? (Edges - 1) * 1e6f / (LastVSyncUs - FirstVSyncUs)
+                      : Edges / Seconds;
   M.H.HighFraction = (float)HHigh / Samples;
   M.V.HighFraction = (float)VHigh / Samples;
   M.SeenHigh = Or & InputMask;
