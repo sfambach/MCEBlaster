@@ -251,9 +251,12 @@ struct CaptureSetup {
   bool PosVSync = true;
   uint32_t LinesPerFrame = 0;
   float PixelHz = 0;
-  // Per line: skip SkipPx pixels after HSync, then take Samples pixels, of
-  // which VisiblePx after the margin are scaled to the 640 output pixels.
-  uint32_t SkipPx = 0, Samples = 0, VisiblePx = 0;
+  uint8_t ColorMask = 0x3f; // sample bits that carry colour
+  // Per line: skip SkipPx pixels after HSync, then take Samples pixels.
+  uint32_t SkipPx = 0, Samples = 0;
+  // The picture as the mode table expects it, in samples and in lines after
+  // VSync; zero width or height when not known.
+  uint32_t Left = 0, Width = 0, Top = 0, Height = 0;
 };
 // Written by core 0, read by core 1. A torn read only costs one bad frame.
 static volatile uint32_t SetupSeq = 0;
@@ -261,13 +264,34 @@ static CaptureSetup Setup;
 // AUTO ADJUST shifts the sampling point by half an input pixel.
 static volatile uint32_t Phase = 0;
 
-// Pixels sampled before and after the visible part, so a slightly wrong
-// back porch does not cut the picture.
-static constexpr uint32_t MarginPx = 8;
+// Pixels sampled before and after the expected picture, so the picture
+// window can grow when a card starts its picture earlier or ends it later.
+static constexpr uint32_t MarginPx = 32;
 static constexpr uint32_t MaxSamples = 768;
-// Input pixel for each output pixel. 720 to 640 drops every ninth pixel,
+// Input sample for each output pixel. 720 to 640 drops every ninth pixel,
 // which in VGA text is the empty ninth column of a character cell.
 static uint16_t XMap[HVisible];
+
+// The picture window on core 1: starts at the mode table's values and grows
+// to every non-black sample and line seen, as the AUTO ADJUST of the MCE
+// Blaster does. Detection runs every DetectEvery frames; those frames are not
+// shown, so the scan fits into the line time.
+static constexpr uint32_t DetectEvery = 8;
+static volatile uint32_t WinLeft = 0, WinRight = 0, WinTop = 0, WinBottom = 0;
+
+static void buildXMap() {
+  for (uint32_t X = 0; X != HVisible; ++X)
+    XMap[X] = WinLeft + X * (WinRight - WinLeft) / HVisible;
+}
+
+static void resetWindow(const CaptureSetup &S) {
+  bool Known = S.Width && S.Height;
+  WinLeft = Known ? S.Left : 0;
+  WinRight = Known ? S.Left + S.Width : S.Samples;
+  WinTop = Known ? S.Top : 0;
+  WinBottom = Known ? S.Top + S.Height : S.LinesPerFrame;
+  buildXMap();
+}
 
 enum class CaptureFail : uint32_t { None, NoVSync, VSyncEnd, Line };
 static volatile uint32_t FramesOk = 0;
@@ -346,7 +370,12 @@ static void __not_in_flash_func(stopCapture)() {
 
 /// Captures one frame straight into the output lines. \returns false
 /// without a signal.
-static bool __not_in_flash_func(captureFrame)(const CaptureSetup &S) {
+static bool WindowFound = false;
+
+/// Captures one frame straight into the output lines, or with \p Detect only
+/// looks for the picture edges. \returns false without a signal.
+static bool __not_in_flash_func(captureFrame)(const CaptureSetup &S,
+                                              bool Detect) {
   uint64_t Deadline = time_us_64() + 100000;
   stage(1, StageCapWait);
   if (!waitPin(TTL_VSYNC_GPIO, !S.PosVSync, Deadline) ||
@@ -374,7 +403,9 @@ static bool __not_in_flash_func(captureFrame)(const CaptureSetup &S) {
   dma_channel_start(CapChan);
   pio_sm_set_enabled(CapPio, CapSM, true);
 
-  uint32_t LastRow = ~0u;
+  uint32_t Top = WinTop, Height = WinBottom - WinTop;
+  uint32_t FoundLeft = ~0u, FoundRight = 0, FoundTop = ~0u, FoundBottom = 0;
+  const uint32_t Mask = RingBytes - 1;
   for (uint32_t Line = 0; Line != S.LinesPerFrame; ++Line) {
     uint32_t Needed = (Line + 1) * WordsPerLine;
     uint64_t LineDeadline = time_us_64() + 1000;
@@ -385,16 +416,48 @@ static bool __not_in_flash_func(captureFrame)(const CaptureSetup &S) {
         LastFailLine = Line;
         return false;
       }
-
-    uint32_t Row = Line * Rows / S.LinesPerFrame;
-    if (Row == LastRow)
-      continue;
-    LastRow = Row;
-    uint8_t *Out = OutLines[Row];
     uint32_t Start = Line * S.Samples;
+
+    if (Detect) {
+      uint32_t L = 0, R = S.Samples;
+      while (L != R && !(Ring[(Start + L) & Mask] & S.ColorMask))
+        ++L;
+      while (R != L && !(Ring[(Start + R - 1) & Mask] & S.ColorMask))
+        --R;
+      if (L != R) {
+        FoundLeft = L < FoundLeft ? L : FoundLeft;
+        FoundRight = R > FoundRight ? R : FoundRight;
+        FoundTop = Line < FoundTop ? Line : FoundTop;
+        FoundBottom = Line + 1;
+      }
+      continue;
+    }
+
+    if (Line < Top || Line >= Top + Height)
+      continue;
+    // Rows this line covers: several when the picture has fewer lines than
+    // the output, none when it has more and an earlier line took the row.
+    uint32_t Row = (Line - Top) * Rows / Height;
+    uint32_t RowEnd = (Line - Top + 1) * Rows / Height;
+    if (Row == RowEnd)
+      continue;
+    uint8_t *Out = OutLines[Row];
     for (uint32_t X = 0; X != HVisible; ++X)
-      Out[X] = ColorLUT[Ring[(Start + XMap[X]) & (RingBytes - 1)]];
-    applyMasks(Row, Out);
+      Out[X] = ColorLUT[Ring[(Start + XMap[X]) & Mask]];
+    for (uint32_t R = Row + 1; R < RowEnd; ++R)
+      std::memcpy(OutLines[R], Out, HVisible);
+    for (uint32_t R = Row; R < RowEnd; ++R)
+      applyMasks(R, OutLines[R]);
+  }
+  if (Detect && FoundTop != ~0u) {
+    bool Known = S.Width && S.Height;
+    bool First = !Known && !WindowFound;
+    WindowFound = true;
+    WinLeft = First || FoundLeft < WinLeft ? FoundLeft : WinLeft;
+    WinRight = First || FoundRight > WinRight ? FoundRight : WinRight;
+    WinTop = First || FoundTop < WinTop ? FoundTop : WinTop;
+    WinBottom = First || FoundBottom > WinBottom ? FoundBottom : WinBottom;
+    buildXMap();
   }
   stopCapture();
   return true;
@@ -433,12 +496,14 @@ static void core1Main() {
       __dmb();
       S = Setup;
       buildLUT(S.Src);
-      for (uint32_t X = 0; X != HVisible; ++X)
-        XMap[X] = MarginPx + X * S.VisiblePx / HVisible;
+      WindowFound = false;
+      resetWindow(S);
       if (S.Src != Source::None)
         configCapture(S);
     }
-    bool HavePicture = S.Src != Source::None && captureFrame(S);
+    static uint32_t FrameCount = 0;
+    bool Detect = ++FrameCount % DetectEvery == 0;
+    bool HavePicture = S.Src != Source::None && captureFrame(S, Detect);
     if (S.Src != Source::None) {
       if (HavePicture)
         FramesOk = FramesOk + 1;
@@ -570,23 +635,24 @@ struct TTLMode {
   const char *Name;
   float HHz, VHz;
   float PixelHz; // the card's usual pixel clock
-  // Pixels from the end of HSync to the picture, and picture width; 0 when
-  // not known, then most of the line is shown.
-  uint32_t BackPorchPx, VisiblePx;
+  // Pixels from the end of HSync to the picture and picture width, lines
+  // from the end of VSync to the picture and picture height; 0 when not
+  // known, then the window comes from the picture alone.
+  uint32_t BackPorchPx, VisiblePx, VBackPorch, VVisible;
 };
 // MDA/CGA/EGA from the MCE Blaster's TimingsTTL.def. CGA and EGA 200 lines
 // share one timing. The VGA modes are not supported by the MCE Blaster; they
 // are listed because VGA cards with a 9-pin TTL output send them.
 static constexpr TTLMode TTLModes[] = {
     // Porches from the standard CRTC values (MDA, CGA) and VESA timings.
-    {"MDA 720x350 50Hz", 18430, 50, 16257000, 9, 720},
-    {"CGA/EGA 640x200 60Hz", 15700, 60, 14318181.0f, 112, 640},
-    {"EGA 640x350 60Hz", 21850, 60, 16257000, 0, 0},
-    {"VGA 720x400 70Hz", 31469, 70, 28322000, 54, 720},
-    {"VGA 640x480 60Hz", 31469, 60, 25175000, 48, 640},
+    {"MDA 720x350 50Hz", 18430, 50, 16257000, 9, 720, 4, 350},
+    {"CGA/EGA 640x200 60Hz", 15700, 60, 14318181.0f, 112, 640, 22, 200},
+    {"EGA 640x350 60Hz", 21850, 60, 16257000, 0, 0, 0, 0},
+    {"VGA 720x400 70Hz", 31469, 70, 28322000, 54, 720, 35, 400},
+    {"VGA 640x480 60Hz", 31469, 60, 25175000, 48, 640, 33, 480},
     // Measured on a Trident TVGA 9-pin output in its non-VGA switch setting;
     // the pixel clock is unknown, so it is measured only.
-    {"TVGA 200 lines 117Hz", 31055, 117.6f, 0, 0, 0},
+    {"TVGA 200 lines 117Hz", 31055, 117.6f, 0, 0, 0, 0, 0},
 };
 
 static const char *guessMode(const Measurement &M) {
@@ -898,6 +964,7 @@ struct LatchedInput {
   bool Valid = false;
   const char *Mode = nullptr;
   float HHz = 0, VHz = 0;
+  float HSyncUs = 0;
   bool PosHSync = true, PosVSync = true;
   Source Src = Source::None;
 };
@@ -951,6 +1018,7 @@ static void updateLatch(const Measurement &M) {
   Latch.VHz = M.V.Hz;
   Latch.PosHSync = M.H.positive();
   Latch.PosVSync = M.V.positive();
+  Latch.HSyncUs = M.H.pulseUs();
   Latch.Src = pickSource(M, Mode);
 }
 
@@ -979,27 +1047,35 @@ static void update(const Measurement &M) {
   for (const TTLMode &T : TTLModes)
     if (T.Name == Latch.Mode)
       Mode = &T;
+  New.ColorMask = Latch.Src == Source::MDA ? 0x3 : 0x3f;
+  // Sample from the end of HSync to shortly before the next one.
+  uint32_t SyncPx = (uint32_t)(Latch.HSyncUs * Clock.Hz / 1e6f);
+  uint32_t Free = Clock.PixelsPerLine > SyncPx + 8
+                      ? Clock.PixelsPerLine - SyncPx - 8
+                      : 0;
   if (Mode && Mode->VisiblePx) {
     New.SkipPx = Mode->BackPorchPx > MarginPx ? Mode->BackPorchPx - MarginPx : 0;
-    New.VisiblePx = Mode->VisiblePx;
-  } else {
-    // Unknown timing: four fifths of the line, which stays clear of the next
-    // HSync in every mode.
-    New.VisiblePx = Clock.PixelsPerLine * 4 / 5 - 2 * MarginPx;
+    New.Left = Mode->BackPorchPx - New.SkipPx;
+    New.Width = Mode->VisiblePx;
+    New.Top = Mode->VBackPorch;
+    New.Height = Mode->VVisible;
   }
-  New.Samples = (New.VisiblePx + 2 * MarginPx + 3) / 4 * 4;
-  if (New.Samples > MaxSamples) {
-    New.Samples = MaxSamples;
-    New.VisiblePx = MaxSamples - 2 * MarginPx;
-  }
-  if (New.Samples < 4 * MarginPx)
+  uint32_t Samples = Free > New.SkipPx ? Free - New.SkipPx : 0;
+  if (Samples > MaxSamples)
+    Samples = MaxSamples;
+  New.Samples = Samples / 4 * 4;
+  if (New.Left + New.Width > New.Samples ||
+      New.Top + New.Height > New.LinesPerFrame)
+    New.Width = New.Height = 0;
+  if (New.Samples < 64)
     New.Src = Source::None;
   bool Changed = New.Src != Setup.Src || New.PosHSync != Setup.PosHSync ||
                  New.PosVSync != Setup.PosVSync ||
                  New.LinesPerFrame != Setup.LinesPerFrame ||
                  New.PixelHz != Setup.PixelHz || New.SkipPx != Setup.SkipPx ||
-                 New.Samples != Setup.Samples ||
-                 New.VisiblePx != Setup.VisiblePx;
+                 New.Samples != Setup.Samples || New.Left != Setup.Left ||
+                 New.Width != Setup.Width || New.Top != Setup.Top ||
+                 New.Height != Setup.Height;
   if (Changed) {
     Setup = New;
     __dmb();
@@ -1042,6 +1118,9 @@ static void update(const Measurement &M) {
   else if (Latch.Valid)
     Line(7, "Measured: no detail, %s", Clock.FromMode ? "mode clock" : "none");
   Line(8, "Picture: %s, phase %lu", sourceName(Latch.Src), (uint32_t)Phase);
+  if (New.Src != Source::None)
+    Line(9, "Window: x %lu-%lu  y %lu-%lu", New.SkipPx + WinLeft,
+         New.SkipPx + WinRight, (uint32_t)WinTop, (uint32_t)WinBottom);
 
   char States[16];
   pinStates(M, EGA_RGB_GPIO, 6, States);
@@ -1059,7 +1138,7 @@ static void update(const Measurement &M) {
          FailNames[(uint32_t)LastFail], LastFailLine);
   else
     Line(13, "Frames: %lu ok", Ok);
-  if (WatchdogReset)
+  if (WatchdogReset && (ResetStage[0] || ResetStage[1]))
     Line(14, "Hang reset: core0 %lu core1 %lu", ResetStage[0], ResetStage[1]);
   Line(15, "PIXEL CLOCK: hide text");
   Line(16, "AUTO ADJUST: sampling phase");
