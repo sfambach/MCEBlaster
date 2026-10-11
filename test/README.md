@@ -23,6 +23,7 @@ Each test lives in its own subfolder with a short `README.md`: what it shows, ho
 | 5 | [`firmware/05_input_test`](firmware/05_input_test/) | Input test: captured input picture in the background, input measurement on top |
 | 6 | [`firmware/06_pixel_clock`](firmware/06_pixel_clock/) | Pixel clock of the input, measured from the colour changes |
 | 7 | [`firmware/07_input_test_pixel_clock`](firmware/07_input_test_pixel_clock/) | Input test sampled once per input pixel: pixel clock measured and snapped to the known clock, latched mode, analysis on top, watchdog against hangs |
+| 8 | [`firmware/08_input_passthrough`](firmware/08_input_passthrough/) | Input passthrough: VGA output at the input's own timing, every input line sent out once, analysis on top |
 
 Each step stays as it is; later steps build on the earlier ones in a new folder.
 

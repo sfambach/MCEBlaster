@@ -1,0 +1,74 @@
+;; Copyright (C) 2026 Stefan Fambach (SteFam), https://www.fambach.net
+;; License: PolyForm Noncommercial 1.0.0, see LICENSE.md in this folder.
+;; Free for noncommercial use; commercial use only with the author's consent.
+;;
+;; VGA output locked to the TTL input: every input line is sent out once.
+;;
+;; PassPixels*: after the end of each input HSync (GPIO 7), waits Y+1 SM
+;; cycles, then outputs ISR+1 pixels, two SM cycles per pixel, and sets the
+;; colour pins to black. Y and ISR are loaded with pio_sm_exec before start.
+;;
+;; SyncMirror: copies one input pin to one output pin, so the output HSync
+;; and VSync are the input's own.
+
+.program PassPixelsPos
+.wrap_target
+    wait 1 gpio 7
+    wait 0 gpio 7
+    mov x, y
+delay:
+    jmp x-- delay
+    mov x, isr
+pixel:
+    out pins, 8
+    jmp x-- pixel
+    mov pins, null
+.wrap
+
+.program PassPixelsNeg
+.wrap_target
+    wait 0 gpio 7
+    wait 1 gpio 7
+    mov x, y
+delay:
+    jmp x-- delay
+    mov x, isr
+pixel:
+    out pins, 8
+    jmp x-- pixel
+    mov pins, null
+.wrap
+
+.program SyncMirror
+.wrap_target
+    mov pins, pins
+.wrap
+
+% c-sdk {
+static inline void PassPixelsInit(PIO Pio, uint SM, uint Offset, bool PosHSync,
+                                  uint FirstGPIO, uint NumPins, float ClkDiv) {
+  for (uint I = 0; I != NumPins; ++I)
+    pio_gpio_init(Pio, FirstGPIO + I);
+  pio_sm_set_consecutive_pindirs(Pio, SM, FirstGPIO, NumPins, /*is_out=*/true);
+  pio_sm_config Conf =
+      PosHSync ? PassPixelsPos_program_get_default_config(Offset)
+               : PassPixelsNeg_program_get_default_config(Offset);
+  sm_config_set_out_pins(&Conf, FirstGPIO, NumPins);
+  // LSB first, so the first byte in memory is the leftmost pixel.
+  sm_config_set_out_shift(&Conf, /*shift_right=*/true, /*autopull=*/true, 32);
+  sm_config_set_fifo_join(&Conf, PIO_FIFO_JOIN_TX);
+  sm_config_set_clkdiv(&Conf, ClkDiv);
+  pio_sm_init(Pio, SM, Offset, &Conf);
+}
+
+static inline void SyncMirrorInit(PIO Pio, uint SM, uint Offset, uint InGPIO,
+                                  uint OutGPIO) {
+  pio_gpio_init(Pio, OutGPIO);
+  pio_sm_set_consecutive_pindirs(Pio, SM, OutGPIO, 1, /*is_out=*/true);
+  pio_sm_config Conf = SyncMirror_program_get_default_config(Offset);
+  sm_config_set_in_pins(&Conf, InGPIO);
+  sm_config_set_out_pins(&Conf, OutGPIO, 1);
+  pio_sm_init(Pio, SM, Offset, &Conf);
+  pio_sm_set_enabled(Pio, SM, true);
+}
+%}
