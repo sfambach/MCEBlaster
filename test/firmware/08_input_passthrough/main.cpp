@@ -200,6 +200,8 @@ enum class CaptureFail : uint32_t { None, NoVSync, VSyncEnd, Line };
 static volatile uint32_t FramesOk = 0;
 static volatile uint32_t FramesFailed = 0;
 // Most lines the capture was ahead of core 1; the capture ring holds ten.
+// In capture words; the line loop does no division, which would run from
+// flash.
 static volatile uint32_t MaxLag = 0;
 static volatile CaptureFail LastFail = CaptureFail::None;
 static volatile uint32_t LastFailLine = 0;
@@ -332,7 +334,7 @@ static void __not_in_flash_func(drawText)(const CaptureSetup &S,
 
 /// Captures one frame; the output sends each line on its own. \returns
 /// false without a signal.
-static bool __not_in_flash_func(captureFrame)(const CaptureSetup &S,
+static bool __no_inline_not_in_flash_func(captureFrame)(const CaptureSetup &S,
                                               float Div) {
   uint64_t Deadline = time_us_64() + 100000;
   stage(1, StageCapWait);
@@ -353,6 +355,8 @@ static bool __not_in_flash_func(captureFrame)(const CaptureSetup &S,
   pio_sm_put(CapPio, CapSM, 2 * S.SkipPx + Phase);
   pio_sm_put(CapPio, CapSM, S.Samples - 1);
   uint32_t WordsPerLine = S.Samples / 4;
+  // Captured words beyond the start of a line at which the capture starts
+  // to overwrite it.
   uint32_t Words = S.CapLines * WordsPerLine;
   dma_channel_set_write_addr(CapChan, Ring, false);
   dma_channel_set_trans_count(CapChan, Words, false);
@@ -369,19 +373,20 @@ static bool __not_in_flash_func(captureFrame)(const CaptureSetup &S,
   const uint32_t Mask = RingBytes - 1;
   for (uint32_t Line = 0; Line != S.CapLines; ++Line) {
     uint32_t Needed = (Line + 1) * WordsPerLine;
-    uint64_t LineDeadline = time_us_64() + 1000;
+    // The raw timer register: time_us_64() runs from flash.
+    uint32_t LineStart = timer_hw->timerawl;
     while (Words - dma_channel_hw_addr(CapChan)->transfer_count < Needed)
-      if (time_us_64() > LineDeadline) {
+      if (timer_hw->timerawl - LineStart > 1000) {
         stopCapture();
         stopOutput();
         LastFail = CaptureFail::Line;
         LastFailLine = Line;
         return false;
       }
-    uint32_t Done = (Words - dma_channel_hw_addr(CapChan)->transfer_count) /
-                    WordsPerLine;
-    if (Done - Line > MaxLag)
-      MaxLag = Done - Line;
+    uint32_t Behind = Words - dma_channel_hw_addr(CapChan)->transfer_count -
+                      Line * WordsPerLine;
+    if (Behind > MaxLag)
+      MaxLag = Behind;
     uint32_t Start = Line * S.Samples;
     // MDA video and intensity become grey levels; EGA and CGA samples carry
     // the six colour bits as they are.
@@ -1100,6 +1105,7 @@ static void update(const Measurement &M) {
   static const char *FailNames[] = {"-", "no VSync", "VSync end", "line"};
   uint32_t Lag = MaxLag;
   MaxLag = 0;
+  Lag /= Setup.Samples >= 4 ? Setup.Samples / 4 : 1;
   if (Failed)
     Line(13, "Frames: %lu ok %lu bad (%s %lu)", Ok, Failed,
          FailNames[(uint32_t)LastFail], LastFailLine);
