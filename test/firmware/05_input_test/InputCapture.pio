@@ -38,7 +38,7 @@ static inline pio_sm_config CaptureConfig(uint Offset, bool PosHSync,
   sm_config_set_in_pins(&Conf, FirstGPIO);
   // Shift right: the first sample ends up in the lowest byte.
   sm_config_set_in_shift(&Conf, /*shift_right=*/true, /*autopush=*/true, 32);
-  sm_config_set_fifo_join(&Conf, PIO_FIFO_JOIN_RX);
+  // No FIFO join: the TX FIFO carries the sample count for `pull`.
   sm_config_set_clkdiv(&Conf, ClkDiv);
   return Conf;
 }
