@@ -192,35 +192,9 @@ static CaptureSetup Setup;
 // AUTO ADJUST shifts the sampling point by half an input pixel.
 static volatile uint32_t Phase = 0;
 
-// Pixels sampled before and after the expected picture, so the picture
-// window can grow when a card starts its picture earlier or ends it later.
+// Pixels sampled before the expected picture.
 static constexpr uint32_t MarginPx = 32;
 static constexpr uint32_t MaxSamples = 768;
-// Input sample for each output pixel. 720 to 640 drops every ninth pixel,
-// which in VGA text is the empty ninth column of a character cell.
-static uint16_t XMap[HVisible];
-
-// The picture window on core 1: starts at the mode table's values and grows
-// to every non-black sample and line seen, as the AUTO ADJUST of the MCE
-// Blaster does. Lines inside the window are only checked in the margins next
-// to it, lines outside are checked whole, so it fits into the line time.
-static volatile uint32_t WinLeft = 0, WinRight = 0, WinTop = 0, WinBottom = 0;
-
-static constexpr uint32_t MaxGrowPx = 16, MaxGrowLines = 8;
-
-static void buildXMap() {
-  for (uint32_t X = 0; X != HVisible; ++X)
-    XMap[X] = WinLeft + X * (WinRight - WinLeft) / HVisible;
-}
-
-static void resetWindow(const CaptureSetup &S) {
-  bool Known = S.Width && S.Height;
-  WinLeft = Known ? S.Left : 0;
-  WinRight = Known ? S.Left + S.Width : S.Samples;
-  WinTop = Known ? S.Top : 0;
-  WinBottom = Known ? S.Top + S.Height : S.CapLines;
-  buildXMap();
-}
 
 enum class CaptureFail : uint32_t { None, NoVSync, VSyncEnd, Line };
 static volatile uint32_t FramesOk = 0;
@@ -237,14 +211,10 @@ static constexpr uint32_t RingBits = 13; // 8 KB, ten lines
 static constexpr uint32_t RingBytes = 1u << RingBits;
 static uint8_t Ring[RingBytes] __attribute__((aligned(RingBytes)));
 
-// The output lines, 640 bytes each, in a ring the output DMA reads with
-// hardware wrap. Input line N goes to output line N + OutDelay, so it is
-// converted before the output reaches it.
-static constexpr uint32_t OutRingBits = 13;
-static constexpr uint32_t OutRingBytes = 1u << OutRingBits;
-static uint8_t OutRing[OutRingBytes] __attribute__((aligned(OutRingBytes)));
+// The output reads the same ring: each captured line goes out unchanged,
+// OutDelay lines later, at the input's own pixel clock. Core 1 only puts the
+// text into the captured lines before the output reaches them.
 static constexpr uint32_t OutDelay = 3;
-static constexpr uint32_t OutWordsPerLine = HVisible / 4;
 
 static PIO OutPio = pio0;
 static uint OutSM, OutPosOffset, OutNegOffset;
@@ -288,7 +258,8 @@ static uint32_t firstGPIO(Source Src) {
   }
 }
 
-static void configCapture(const CaptureSetup &S) {
+/// \returns the clock divider, which the output uses too.
+static float configCapture(const CaptureSetup &S) {
   pio_sm_set_enabled(CapPio, CapSM, false);
   // Two SM cycles per sample: one sample per input pixel.
   float Div = SysClkKHz * 1000.0f / (2 * S.PixelHz);
@@ -297,6 +268,7 @@ static void configCapture(const CaptureSetup &S) {
   uint Offset = S.PosHSync ? PosOffset : NegOffset;
   pio_sm_config Conf = CaptureConfig(Offset, S.PosHSync, firstGPIO(S.Src), Div);
   pio_sm_init(CapPio, CapSM, Offset, &Conf);
+  return Div;
 }
 
 static bool __not_in_flash_func(waitPin)(uint32_t GPIO, bool Level,
@@ -312,58 +284,56 @@ static void __not_in_flash_func(stopCapture)() {
   dma_channel_abort(CapChan);
 }
 
-/// Captures one frame straight into the output lines. \returns false
-/// without a signal.
-static uint8_t BlackLine[HVisible];
-
-static void __not_in_flash_func(writeOutLine)(uint32_t OutLine,
-                                              const uint8_t *Src) {
-  uint32_t Start = OutLine * HVisible;
-  for (uint32_t X = 0; X != HVisible; ++X)
-    OutRing[(Start + X) & (OutRingBytes - 1)] = Src[X];
-}
-
 static void __not_in_flash_func(stopOutput)() {
   pio_sm_set_enabled(OutPio, OutSM, false);
   dma_channel_abort(OutChan);
 }
 
-/// Loads the output SM for one frame: delay from HSync end and pixel clock
-/// from the window, so the 640 output pixels cover the window exactly.
-static void __not_in_flash_func(armOutput)(const CaptureSetup &S,
-                                           uint32_t Lines) {
-  uint32_t Width = WinRight - WinLeft;
-  // Two SM cycles per output pixel; the window lasts Width input pixels.
-  float OutHz = S.PixelHz * HVisible / Width;
-  float Div = SysClkKHz * 1000.0f / (2 * OutHz);
-  // A fractional divider stretches single SM cycles, so pixel edges jitter
-  // and the picture sparkles. A whole divider is used when it is off by
-  // less than 0.5 %; for 720x400 that is 5, 25.2 MHz instead of 25.175 MHz.
-  float Whole = std::round(Div);
-  if (std::fabs(Div - Whole) < Div * 0.005f)
-    Div = Whole;
-  pio_sm_set_clkdiv(OutPio, OutSM, Div < 1 ? 1 : Div);
-  // Delay in SM cycles: the window start in input pixels, two cycles per
-  // output pixel; the capture's phase delay is matched by the same count.
-  uint32_t Delay = 2 * (S.SkipPx + WinLeft) * HVisible / Width;
+/// Loads the output SM for one frame: same delay after HSync and same clock
+/// as the capture, reading the ring OutDelay lines behind it.
+static void __not_in_flash_func(armOutput)(const CaptureSetup &S, float Div) {
   uint Offset = S.PosHSync ? OutPosOffset : OutNegOffset;
+  pio_sm_set_clkdiv(OutPio, OutSM, Div);
   pio_sm_clear_fifos(OutPio, OutSM);
   pio_sm_restart(OutPio, OutSM);
-  pio_sm_put(OutPio, OutSM, HVisible - 1);
+  pio_sm_put(OutPio, OutSM, S.Samples - 1);
   pio_sm_exec(OutPio, OutSM, pio_encode_pull(false, true));
   pio_sm_exec(OutPio, OutSM, pio_encode_mov(pio_isr, pio_osr));
-  pio_sm_put(OutPio, OutSM, Delay);
+  pio_sm_put(OutPio, OutSM, 2 * S.SkipPx);
   pio_sm_exec(OutPio, OutSM, pio_encode_pull(false, true));
   pio_sm_exec(OutPio, OutSM, pio_encode_mov(pio_y, pio_osr));
   pio_sm_exec(OutPio, OutSM, pio_encode_out(pio_null, 32));
   pio_sm_exec(OutPio, OutSM, pio_encode_jmp(Offset));
-  dma_channel_set_read_addr(OutChan, OutRing, false);
-  dma_channel_set_trans_count(OutChan, Lines * OutWordsPerLine, true);
+  // The lines before the first captured one are black.
+  uint32_t Lead = OutDelay * S.Samples;
+  uint32_t First = (RingBytes - Lead) & (RingBytes - 1);
+  for (uint32_t I = 0; I != Lead; ++I)
+    Ring[(First + I) & (RingBytes - 1)] = Black | Idle;
+  dma_channel_set_read_addr(OutChan, Ring + First, false);
+  dma_channel_set_trans_count(OutChan, (S.CapLines + OutDelay) * S.Samples / 4,
+                              true);
 }
 
-/// Captures one frame and sends each line to the output. \returns false
-/// without a signal.
-static bool __not_in_flash_func(captureFrame)(const CaptureSetup &S) {
+/// Text on top of one captured line, also when it wraps around the ring.
+static void __not_in_flash_func(drawText)(const CaptureSetup &S,
+                                          uint32_t Start, uint32_t Row) {
+  static uint8_t Tmp[HVisible];
+  uint32_t Off = (Start + S.Left) & (RingBytes - 1);
+  if (Off + HVisible <= RingBytes) {
+    applyMasks(Row, Ring + Off);
+    return;
+  }
+  for (uint32_t X = 0; X != HVisible; ++X)
+    Tmp[X] = Ring[(Off + X) & (RingBytes - 1)];
+  applyMasks(Row, Tmp);
+  for (uint32_t X = 0; X != HVisible; ++X)
+    Ring[(Off + X) & (RingBytes - 1)] = Tmp[X];
+}
+
+/// Captures one frame; the output sends each line on its own. \returns
+/// false without a signal.
+static bool __not_in_flash_func(captureFrame)(const CaptureSetup &S,
+                                              float Div) {
   uint64_t Deadline = time_us_64() + 100000;
   stage(1, StageCapWait);
   if (!waitPin(TTL_VSYNC_GPIO, !S.PosVSync, Deadline) ||
@@ -386,9 +356,7 @@ static bool __not_in_flash_func(captureFrame)(const CaptureSetup &S) {
   uint32_t Words = S.CapLines * WordsPerLine;
   dma_channel_set_write_addr(CapChan, Ring, false);
   dma_channel_set_trans_count(CapChan, Words, false);
-  for (uint32_t L = 0; L != OutDelay; ++L)
-    writeOutLine(L, BlackLine);
-  armOutput(S, S.CapLines + OutDelay);
+  armOutput(S, Div);
   if (!waitPin(TTL_VSYNC_GPIO, !S.PosVSync, Deadline)) {
     LastFail = CaptureFail::VSyncEnd;
     return false;
@@ -398,12 +366,7 @@ static bool __not_in_flash_func(captureFrame)(const CaptureSetup &S) {
   pio_sm_set_enabled(CapPio, CapSM, true);
   pio_sm_set_enabled(OutPio, OutSM, true);
 
-  uint32_t Top = WinTop, Bottom = WinBottom;
-  uint32_t Left = WinLeft, Right = WinRight;
-  uint32_t FoundLeft = Left, FoundRight = Right;
-  uint32_t FoundTop = Top, FoundBottom = Bottom;
   const uint32_t Mask = RingBytes - 1;
-  static uint8_t Out[HVisible] __attribute__((aligned(4)));
   for (uint32_t Line = 0; Line != S.CapLines; ++Line) {
     uint32_t Needed = (Line + 1) * WordsPerLine;
     uint64_t LineDeadline = time_us_64() + 1000;
@@ -420,82 +383,15 @@ static bool __not_in_flash_func(captureFrame)(const CaptureSetup &S) {
     if (Done - Line > MaxLag)
       MaxLag = Done - Line;
     uint32_t Start = Line * S.Samples;
-    auto Lit = [&](uint32_t X) {
-      return Ring[(Start + X) & Mask] & S.ColorMask;
-    };
-
-    if (Line < Top || Line >= Bottom) {
-      // Outside the window: black, but look for picture in the whole line.
-      writeOutLine(Line + OutDelay, BlackLine);
-      for (uint32_t X = 0; X != S.Samples; ++X)
-        if (Lit(X)) {
-          FoundTop = Line < FoundTop ? Line : FoundTop;
-          FoundBottom = Line + 1 > FoundBottom ? Line + 1 : FoundBottom;
-          FoundLeft = X < FoundLeft ? X : FoundLeft;
-          break;
-        }
-      continue;
-    }
-
-    // Straight through when neither line wraps around its ring; this is
-    // the time-critical path, the line time is about 32 us at 31 kHz.
-    uint32_t CapOff = Start & Mask;
-    uint32_t OutOff = (Line + OutDelay) * HVisible & (OutRingBytes - 1);
-    uint8_t *Dst =
-        OutOff + HVisible <= OutRingBytes ? OutRing + OutOff : Out;
-    if (CapOff + S.Samples <= RingBytes && S.Src != Source::MDA) {
-      // EGA and CGA: the six colour bits are the low sample bits and go out
-      // unchanged; the top two bits land on pins the output does not drive.
-      const uint8_t *Src = Ring + CapOff;
-      const uint16_t *Map = XMap;
-      for (uint32_t X = 0; X != HVisible; X += 4, Map += 4) {
-        Dst[X] = Src[Map[0]];
-        Dst[X + 1] = Src[Map[1]];
-        Dst[X + 2] = Src[Map[2]];
-        Dst[X + 3] = Src[Map[3]];
+    // MDA video and intensity become grey levels; EGA and CGA samples carry
+    // the six colour bits as they are.
+    if (S.Src == Source::MDA)
+      for (uint32_t X = 0; X != S.Samples; ++X) {
+        uint8_t &P = Ring[(Start + X) & Mask];
+        P = ColorLUT[P];
       }
-    } else if (CapOff + S.Samples <= RingBytes) {
-      const uint8_t *Src = Ring + CapOff;
-      for (uint32_t X = 0; X != HVisible; ++X)
-        Dst[X] = ColorLUT[Src[XMap[X]]];
-    } else {
-      for (uint32_t X = 0; X != HVisible; ++X)
-        Dst[X] = ColorLUT[Ring[(Start + XMap[X]) & Mask]];
-    }
-    applyMasks((Line - Top) / 2, Dst);
-    if (Dst == Out)
-      writeOutLine(Line + OutDelay, Out);
-    // The margins next to the window.
-    for (uint32_t X = 0; X < Left; ++X)
-      if (Lit(X)) {
-        FoundLeft = X < FoundLeft ? X : FoundLeft;
-        break;
-      }
-    for (uint32_t X = S.Samples; X > Right; --X)
-      if (Lit(X - 1)) {
-        FoundRight = X > FoundRight ? X : FoundRight;
-        break;
-      }
-  }
-  // A known mode's window grows only a little: a card may start its picture
-  // a few pixels early, but a coloured border must not count as picture.
-  if (S.Width && S.Height) {
-    uint32_t MinLeft = S.Left > MaxGrowPx ? S.Left - MaxGrowPx : 0;
-    uint32_t MinTop = S.Top > MaxGrowLines ? S.Top - MaxGrowLines : 0;
-    FoundLeft = FoundLeft < MinLeft ? MinLeft : FoundLeft;
-    FoundTop = FoundTop < MinTop ? MinTop : FoundTop;
-    uint32_t MaxRight = S.Left + S.Width + MaxGrowPx;
-    uint32_t MaxBottom = S.Top + S.Height + MaxGrowLines;
-    FoundRight = FoundRight > MaxRight ? MaxRight : FoundRight;
-    FoundBottom = FoundBottom > MaxBottom ? MaxBottom : FoundBottom;
-  }
-  if (FoundLeft != Left || FoundRight != Right || FoundTop != Top ||
-      FoundBottom != Bottom) {
-    WinLeft = FoundLeft;
-    WinRight = FoundRight;
-    WinTop = FoundTop;
-    WinBottom = FoundBottom;
-    buildXMap();
+    if (Line >= S.Top)
+      drawText(S, Start, (Line - S.Top) / 2);
   }
   stopCapture();
   return true;
@@ -528,20 +424,20 @@ static void core1Main() {
                  TTL_HSYNC_GPIO, VGA_HSYNC_GPIO);
   SyncMirrorInit(OutPio, pio_claim_unused_sm(OutPio, true), MirrorOffset,
                  TTL_VSYNC_GPIO, VGA_VSYNC_GPIO);
-  std::memset(BlackLine, Black | Idle, sizeof(BlackLine));
   OutChan = dma_claim_unused_channel(true);
   dma_channel_config OutConf = dma_channel_get_default_config(OutChan);
   channel_config_set_transfer_data_size(&OutConf, DMA_SIZE_32);
   channel_config_set_read_increment(&OutConf, true);
   channel_config_set_write_increment(&OutConf, false);
-  channel_config_set_ring(&OutConf, /*write=*/false, OutRingBits);
+  channel_config_set_ring(&OutConf, /*write=*/false, RingBits);
   channel_config_set_high_priority(&OutConf, true);
   channel_config_set_dreq(&OutConf, pio_get_dreq(OutPio, OutSM, /*is_tx=*/true));
-  dma_channel_configure(OutChan, &OutConf, &OutPio->txf[OutSM], OutRing, 0,
+  dma_channel_configure(OutChan, &OutConf, &OutPio->txf[OutSM], Ring, 0,
                         /*trigger=*/false);
 
   uint32_t SeenSeq = ~0u;
   CaptureSetup S;
+  float Div = 1;
   while (true) {
     if (SeenSeq != SetupSeq) {
       SeenSeq = SetupSeq;
@@ -549,15 +445,14 @@ static void core1Main() {
       __dmb();
       S = Setup;
       buildLUT(S.Src);
-      resetWindow(S);
       if (S.Src != Source::None) {
-        configCapture(S);
+        Div = configCapture(S);
         stopOutput();
         PassPixelsInit(OutPio, OutSM, S.PosHSync ? OutPosOffset : OutNegOffset,
                        S.PosHSync, VGA_FIRST_GPIO, 6, 1.0f);
       }
     }
-    bool HavePicture = S.Src != Source::None && captureFrame(S);
+    bool HavePicture = S.Src != Source::None && captureFrame(S, Div);
     if (S.Src != Source::None) {
       if (HavePicture)
         FramesOk = FramesOk + 1;
@@ -1192,10 +1087,6 @@ static void update(const Measurement &M) {
   else if (Latch.Valid)
     Line(7, "Measured: no detail, %s", Clock.FromMode ? "mode clock" : "none");
   Line(8, "Picture: %s, phase %lu", sourceName(Latch.Src), (uint32_t)Phase);
-  if (New.Src != Source::None)
-    Line(9, "Window: x %lu-%lu  y %lu-%lu", New.SkipPx + WinLeft,
-         New.SkipPx + WinRight, (uint32_t)WinTop, (uint32_t)WinBottom);
-
   char States[16];
   pinStates(M, EGA_RGB_GPIO, 6, States);
   Line(10, "EGA GPIO  0-5:  %s", States);
@@ -1224,7 +1115,8 @@ static void update(const Measurement &M) {
     if (Len > O.Width)
       O.Width = Len;
   }
-  buildMasks(O, MaskBufs[!Shown], (WinBottom - WinTop) / 2);
+  buildMasks(O, MaskBufs[!Shown],
+             (Setup.Height ? Setup.Height : Setup.CapLines) / 2);
   Shown = !Shown;
 
   stage(0, StagePrint);
