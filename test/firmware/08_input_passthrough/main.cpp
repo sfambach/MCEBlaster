@@ -332,6 +332,12 @@ static void __not_in_flash_func(armOutput)(const CaptureSetup &S,
   // Two SM cycles per output pixel; the window lasts Width input pixels.
   float OutHz = S.PixelHz * HVisible / Width;
   float Div = SysClkKHz * 1000.0f / (2 * OutHz);
+  // A fractional divider stretches single SM cycles, so pixel edges jitter
+  // and the picture sparkles. A whole divider is used when it is off by
+  // less than 0.5 %; for 720x400 that is 5, 25.2 MHz instead of 25.175 MHz.
+  float Whole = std::round(Div);
+  if (std::fabs(Div - Whole) < Div * 0.005f)
+    Div = Whole;
   pio_sm_set_clkdiv(OutPio, OutSM, Div < 1 ? 1 : Div);
   // Delay in SM cycles: the window start in input pixels, two cycles per
   // output pixel; the capture's phase delay is matched by the same count.
