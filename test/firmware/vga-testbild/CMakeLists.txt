@@ -1,3 +1,7 @@
+# Copyright (C) 2026 Stefan Fambach (SteFam), https://www.fambach.net
+# License: PolyForm Noncommercial 1.0.0, see LICENSE.md in this folder.
+# Free for noncommercial use; commercial use only with the author's consent.
+#
 # VGA test picture for the MCE Blaster.
 #
 # $ mkdir build && cd build
@@ -17,14 +21,10 @@ set(CMAKE_CXX_STANDARD 17)
 
 pico_sdk_init()
 
-set(MCEBLASTER_SRC "${CMAKE_CURRENT_LIST_DIR}/../../../firmware/src")
-
 function(add_testbild NAME MODE)
   add_executable(${NAME} main.cpp)
   pico_generate_pio_header(${NAME} ${CMAKE_CURRENT_LIST_DIR}/VGAOut.pio)
   target_compile_definitions(${NAME} PRIVATE VGA_MODE=${MODE})
-  # Bitmaps.h: the 8x8 font of the MCE Blaster.
-  target_include_directories(${NAME} PRIVATE ${MCEBLASTER_SRC})
   target_link_libraries(${NAME} pico_stdlib hardware_pio hardware_dma)
   pico_enable_stdio_usb(${NAME} 1)
   pico_enable_stdio_uart(${NAME} 0)

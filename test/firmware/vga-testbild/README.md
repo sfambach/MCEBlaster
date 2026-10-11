@@ -31,3 +31,9 @@ Copy the UF2 to the Pico as described in the main README (BOOTSEL). Flash the no
 ## How it works
 
 Each distinct scanline (blank, vsync, top/bottom frame, side frame, one per text row) is stored once, including the sync bits (bit 6 HSync, bit 7 VSync, same GPIOs 14-21 as the MCE Blaster). A table holds one pointer per scanline. A DMA control channel feeds these pointers to a data channel that streams the line into a one-instruction PIO program (`out pins, 8`), so the picture runs without the CPU. An interrupt only rewinds the table once per frame.
+
+## License
+
+Copyright (C) 2026 Stefan Fambach (SteFam), https://www.fambach.net
+
+PolyForm Noncommercial 1.0.0, see [LICENSE.md](LICENSE.md): free to use, change and share for noncommercial purposes; commercial use only with my consent. `Font8x8.h` is public domain (Daniel Hepper). This folder contains no code from the MCE Blaster firmware; the pin assignment and the VGA timings follow the MCE Blaster so the test runs on its hardware. The MCE Blaster itself is GPLv2 by Scrap Computing.

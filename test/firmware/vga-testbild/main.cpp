@@ -1,12 +1,16 @@
 //-*- C++ -*-
 //
+// Copyright (C) 2026 Stefan Fambach (SteFam), https://www.fambach.net
+// License: PolyForm Noncommercial 1.0.0, see LICENSE.md in this folder.
+// Free for noncommercial use; commercial use only with the author's consent.
+//
 // Static VGA test picture for the MCE Blaster: a white frame along the edge of
 // the visible area and the VGA resolution, line and frame frequency as text.
 // No TTL input is used, this only tests the VGA side (Pico, DAC, cable,
 // monitor).
 //
 
-#include "Bitmaps.h"
+#include "Font8x8.h"
 #include "VGAOut.pio.h"
 #include "hardware/clocks.h"
 #include "hardware/dma.h"
@@ -49,11 +53,11 @@ struct VGATiming {
 // The three modes the MCE Blaster outputs (TimingsVGA.def), without the
 // MCE Blaster's extra border pixels.
 static constexpr VGATiming Timings[] = {
-    {"640X400", 640, 16, 96, 48, 400, 12, 2, 35, Polarity::Neg, Polarity::Pos,
+    {"640x400", 640, 16, 96, 48, 400, 12, 2, 35, Polarity::Neg, Polarity::Pos,
      10},
-    {"640X480", 640, 16, 96, 48, 480, 10, 2, 33, Polarity::Neg, Polarity::Neg,
+    {"640x480", 640, 16, 96, 48, 480, 10, 2, 33, Polarity::Neg, Polarity::Neg,
      10},
-    {"800X600", 800, 24, 72, 128, 600, 1, 2, 22, Polarity::Pos, Polarity::Pos,
+    {"800x600", 800, 24, 72, 128, 600, 1, 2, 22, Polarity::Pos, Polarity::Pos,
      7},
 };
 static constexpr const VGATiming &T = Timings[VGA_MODE];
@@ -70,35 +74,12 @@ static uint8_t BlankLine[MaxHTotal] __attribute__((aligned(4)));
 static uint8_t VSyncLine[MaxHTotal] __attribute__((aligned(4)));
 static uint8_t FullBorderLine[MaxHTotal] __attribute__((aligned(4)));
 static uint8_t SideBorderLine[MaxHTotal] __attribute__((aligned(4)));
-static uint8_t TxtLines[NumTxtLines][BMapHeight][MaxHTotal]
+static uint8_t TxtLines[NumTxtLines][FontHeight][MaxHTotal]
     __attribute__((aligned(4)));
 static const uint8_t *Frame[MaxVTotal];
 
 static int DataChan;
 static int CtrlChan;
-
-static const uint8_t *getChar(char C) {
-  // clang-format off
-  switch (C) {
-  case '0': return Char_0; case '1': return Char_1; case '2': return Char_2;
-  case '3': return Char_3; case '4': return Char_4; case '5': return Char_5;
-  case '6': return Char_6; case '7': return Char_7; case '8': return Char_8;
-  case '9': return Char_9;
-  case 'A': return Char_A; case 'B': return Char_B; case 'C': return Char_C;
-  case 'D': return Char_D; case 'E': return Char_E; case 'F': return Char_F;
-  case 'G': return Char_G; case 'H': return Char_H; case 'I': return Char_I;
-  case 'J': return Char_J; case 'K': return Char_K; case 'L': return Char_L;
-  case 'M': return Char_M; case 'N': return Char_N; case 'O': return Char_O;
-  case 'P': return Char_P; case 'Q': return Char_Q; case 'R': return Char_R;
-  case 'S': return Char_S; case 'T': return Char_T; case 'U': return Char_U;
-  case 'V': return Char_V; case 'W': return Char_W; case 'X': return Char_X;
-  case 'Y': return Char_Y; case 'Z': return Char_Z;
-  case '.': return Char_PERIOD; case ':': return Char_COLON;
-  case '@': return Char_AT; case '-': return Char_MINUS;
-  default: return Char_SPACE;
-  }
-  // clang-format on
-}
 
 /// Fills \p Line with black pixels and the sync levels for this line.
 static void initLine(uint8_t *Line, bool InVSync) {
@@ -117,13 +98,13 @@ static void setPixel(uint8_t *Line, uint32_t X, uint8_t Color) {
 
 /// Draws font row \p Row of \p Txt, centered, into \p Line.
 static void drawTxtRow(uint8_t *Line, const char *Txt, uint32_t Row) {
-  uint32_t Width = std::strlen(Txt) * BMapWidth * Zoom;
+  uint32_t Width = std::strlen(Txt) * FontWidth * Zoom;
   uint32_t X = (T.HVisible - Width) / 2;
   for (const char *C = Txt; *C; ++C) {
-    uint8_t Bits = getChar(*C)[Row];
-    for (uint32_t Col = 0; Col != BMapWidth; ++Col) {
-      // Bit 7 is the leftmost pixel.
-      bool On = Bits & (1u << (BMapWidth - 1 - Col));
+    uint8_t Bits = Font8x8[*C & 0x7f][Row];
+    for (uint32_t Col = 0; Col != FontWidth; ++Col) {
+      // Bit 0 is the leftmost pixel.
+      bool On = Bits & (1u << Col);
       for (uint32_t Z = 0; Z != Zoom; ++Z)
         setPixel(Line, X++, On ? White : Black);
     }
@@ -140,14 +121,14 @@ static void addSideBorder(uint8_t *Line) {
 static void buildFrame() {
   char Txt[NumTxtLines][40];
   std::snprintf(Txt[0], sizeof(Txt[0]), "MCE BLASTER VGA TEST");
-  std::snprintf(Txt[1], sizeof(Txt[1]), "%s @ %.2f HZ", T.Name, T.vHz());
-  std::snprintf(Txt[2], sizeof(Txt[2]), "H: %.3f KHZ  V: %.2f HZ",
+  std::snprintf(Txt[1], sizeof(Txt[1]), "%s @ %.2f Hz", T.Name, T.vHz());
+  std::snprintf(Txt[2], sizeof(Txt[2]), "H: %.3f kHz  V: %.2f Hz",
                 T.hHz() / 1000.0f, T.vHz());
-  std::snprintf(Txt[3], sizeof(Txt[3]), "PIXELCLOCK: %.3f MHZ",
+  std::snprintf(Txt[3], sizeof(Txt[3]), "Pixel clock: %.3f MHz",
                 T.pixelClkHz() / 1000000.0f);
   Txt[4][0] = '\0';
-  std::snprintf(Txt[5], sizeof(Txt[5]), "THANKS TO SCRAP COMPUTING");
-  std::snprintf(Txt[6], sizeof(Txt[6]), "GREETINGS STEFAM");
+  std::snprintf(Txt[5], sizeof(Txt[5]), "Thanks to Scrap Computing");
+  std::snprintf(Txt[6], sizeof(Txt[6]), "Greetings SteFam");
 
   initLine(BlankLine, false);
   initLine(VSyncLine, true);
@@ -157,13 +138,13 @@ static void buildFrame() {
   initLine(SideBorderLine, false);
   addSideBorder(SideBorderLine);
   for (uint32_t L = 0; L != NumTxtLines; ++L)
-    for (uint32_t Row = 0; Row != BMapHeight; ++Row) {
+    for (uint32_t Row = 0; Row != FontHeight; ++Row) {
       initLine(TxtLines[L][Row], false);
       addSideBorder(TxtLines[L][Row]);
       drawTxtRow(TxtLines[L][Row], Txt[L], Row);
     }
 
-  uint32_t TxtRowHeight = BMapHeight * Zoom + TxtLineGap;
+  uint32_t TxtRowHeight = FontHeight * Zoom + TxtLineGap;
   uint32_t TxtTop = (T.VVisible - NumTxtLines * TxtRowHeight) / 2;
   for (uint32_t Y = 0; Y != T.vTotal(); ++Y) {
     if (Y >= T.VVisible) {
@@ -177,7 +158,7 @@ static void buildFrame() {
       if (Y >= TxtTop) {
         uint32_t L = (Y - TxtTop) / TxtRowHeight;
         uint32_t RowPx = (Y - TxtTop) % TxtRowHeight;
-        if (L < NumTxtLines && RowPx < BMapHeight * Zoom)
+        if (L < NumTxtLines && RowPx < FontHeight * Zoom)
           Frame[Y] = TxtLines[L][RowPx / Zoom];
       }
     }
