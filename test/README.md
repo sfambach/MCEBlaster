@@ -21,6 +21,7 @@ Each test lives in its own subfolder with a short `README.md`: what it shows, ho
 | 3 | [`firmware/03_vga_comic_800x600`](firmware/03_vga_comic_800x600/) | All 64 colours and the full 800x600 area: comic picture |
 | 4 | [`firmware/04_ttl_input_analyzer`](firmware/04_ttl_input_analyzer/) | TTL input: sync frequencies, polarity, detected mode, which input pins toggle |
 | 5 | [`firmware/05_input_test`](firmware/05_input_test/) | Input test: captured input picture in the background, input measurement on top |
+| 6 | [`firmware/06_pixel_clock`](firmware/06_pixel_clock/) | Pixel clock of the input, measured from the colour changes |
 
 Each step stays as it is; later steps build on the earlier ones in a new folder.
 
