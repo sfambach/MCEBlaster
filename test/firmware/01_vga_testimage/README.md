@@ -37,3 +37,7 @@ Each distinct scanline (blank, vsync, top/bottom frame, side frame, one per text
 Copyright (C) 2026 Stefan Fambach (SteFam), https://www.fambach.net
 
 PolyForm Noncommercial 1.0.0, see [LICENSE.md](LICENSE.md): free to use, change and share for noncommercial purposes; commercial use only with my consent. `Font8x8.h` is public domain (Daniel Hepper). This folder contains no code from the MCE Blaster firmware; the pin assignment and the VGA timings follow the MCE Blaster so the test runs on its hardware. The MCE Blaster itself is GPLv2 by Scrap Computing.
+
+## Prebuilt UF2
+
+Ready-to-flash files are in [`uf2/pico`](uf2/pico/) (RP2040) and [`uf2/pico2`](uf2/pico2/) (RP2350).
