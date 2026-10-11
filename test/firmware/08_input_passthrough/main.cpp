@@ -632,6 +632,11 @@ static void pinStates(const Measurement &M, uint32_t First, uint32_t Num,
 static Source pickSource(const Measurement &M, const char *Mode) {
   if (!Mode)
     return Source::None;
+  // An MDA card's video and intensity also reach the CGA/EGA inputs (DE9
+  // pins 7 and 6 are EGA's secondary blue and green), which shows MDA as a
+  // blue picture. In MDA timing the MDA pins win.
+  if (std::strncmp(Mode, "MDA", 3) == 0 && M.toggles(MDA_VI_GPIO, 2))
+    return Source::MDA;
   if (M.toggles(CGA_RGB_GPIO, 6))
     return Source::CGA;
   if (M.toggles(EGA_RGB_GPIO, 6))
