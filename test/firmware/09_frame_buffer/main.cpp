@@ -75,12 +75,14 @@ static uint16_t PairLUT[256];
 static uint8_t BlankLine[HTotal] __attribute__((aligned(4)));
 static uint8_t VSyncLine[HTotal] __attribute__((aligned(4)));
 // Visible lines rotate through four buffers. The line IRQ fills the buffer
-// for two lines ahead, so it may come more than a line late without the
-// output catching up with it.
-static constexpr uint32_t NumWork = 4, FillAhead = 2;
+// for three lines ahead, so it may come two lines late without the output
+// catching up with it.
+static constexpr uint32_t NumWork = 4, FillAhead = 3;
 static uint8_t Work[NumWork][HTotal] __attribute__((aligned(4)));
-// Lines the IRQ filled while the output was already sending them.
-static volatile uint32_t LateLines = 0;
+// Lines the output started sending before the IRQ had finished them, the
+// first and last such line, and the longest IRQ in microseconds.
+static volatile uint32_t LateLines = 0, LateFirst = 0, LateLast = 0;
+static volatile uint32_t IrqMaxUs = 0;
 static const uint8_t *Frame[VTotal];
 
 static PIO VGAPio = pio0;
@@ -156,11 +158,19 @@ static void __not_in_flash_func(ctrlChanIRQ)() {
   if (Y >= VTotal)
     Y -= VTotal;
   if (Y < VVisible) {
+    uint32_t Start = timer_hw->timerawl;
     uint8_t *Buf = Work[Y % NumWork];
-    uintptr_t Sending = dma_hw->ch[DataChan].read_addr;
-    if (Sending > (uintptr_t)Buf && Sending <= (uintptr_t)(Buf + HTotal))
-      LateLines = LateLines + 1;
     fillLine(Y, Buf);
+    uintptr_t Sending = dma_hw->ch[DataChan].read_addr;
+    if (Sending > (uintptr_t)Buf && Sending <= (uintptr_t)(Buf + HTotal)) {
+      if (!LateLines)
+        LateFirst = Y;
+      LateLast = Y;
+      LateLines = LateLines + 1;
+    }
+    uint32_t Took = timer_hw->timerawl - Start;
+    if (Took > IrqMaxUs)
+      IrqMaxUs = Took;
   }
 }
 
@@ -1299,7 +1309,9 @@ static void update(const Measurement &M) {
   static const char *FailNames[] = {"-", "no VSync", "VSync end", "line",
                                     "late"};
   uint32_t Lag = MaxLag, Stalled = StalledFrames, OutLate = LateLines;
+  uint32_t OutFirst = LateFirst, OutLast = LateLast, OutMaxUs = IrqMaxUs;
   LateLines = 0;
+  IrqMaxUs = 0;
   MaxLag = 0;
   Lag /= Setup.Samples >= 4 ? Setup.Samples / 4 : 1;
   StalledFrames = 0;
@@ -1311,6 +1323,9 @@ static void update(const Measurement &M) {
          Stalled, OutLate);
   if (WatchdogReset && (ResetStage[0] || ResetStage[1]))
     Line(14, "Hang reset: core0 %lu core1 %lu", ResetStage[0], ResetStage[1]);
+  else
+    Line(14, "Out: late %lu y %lu-%lu, irq %lu us", OutLate, OutFirst, OutLast,
+         OutMaxUs);
   Line(15, "PIXEL CLOCK: hide text");
   Line(16, "AUTO ADJUST: sampling phase");
 
