@@ -340,7 +340,6 @@ static void show(const Measurement &M) {
   std::snprintf(Txt[10], sizeof(Txt[10]), "MDA GPIO 26-27: %s", States);
   pinStates(M, TTL_VSYNC_GPIO, 2, States);
   std::snprintf(Txt[11], sizeof(Txt[11]), "V/H GPIO  6-7:  %s", States);
-  std::snprintf(Txt[13], sizeof(Txt[13]), "Thanks to Scrap Computing");
   std::snprintf(Txt[14], sizeof(Txt[14]), "Greetings SteFam");
 
   for (uint32_t L = 0; L != NumTxtLines; ++L) {
