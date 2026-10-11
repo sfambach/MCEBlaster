@@ -22,7 +22,7 @@ Each test lives in its own subfolder with a short `README.md`: what it shows, ho
 | 4 | [`firmware/04_ttl_input_analyzer`](firmware/04_ttl_input_analyzer/) | TTL input: sync frequencies, polarity, detected mode, which input pins toggle |
 | 5 | [`firmware/05_input_test`](firmware/05_input_test/) | Input test: captured input picture in the background, input measurement on top |
 | 6 | [`firmware/06_pixel_clock`](firmware/06_pixel_clock/) | Pixel clock of the input, measured from the colour changes |
-| 7 | [`firmware/07_input_test_pixel_clock`](firmware/07_input_test_pixel_clock/) | Input test sampled at the measured pixel clock: sharp input picture, analysis on top |
+| 7 | [`firmware/07_input_test_pixel_clock`](firmware/07_input_test_pixel_clock/) | Input test sampled once per input pixel: pixel clock measured and snapped to the known clock, latched mode, analysis on top, watchdog against hangs |
 
 Each step stays as it is; later steps build on the earlier ones in a new folder.
 
