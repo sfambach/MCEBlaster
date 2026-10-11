@@ -2,8 +2,7 @@
 # License: PolyForm Noncommercial 1.0.0, see LICENSE.md in this folder.
 # Free for noncommercial use; commercial use only with the author's consent.
 #
-# Step 3: comic picture in 800x600 for the MCE Blaster (400x300 pixels,
-# each pixel shown 2x2).
+# Step 3: full-screen comic picture at 800x600 for the MCE Blaster.
 #
 # $ mkdir build && cd build
 # $ cmake -DPICO_BOARD=<pico|pico2> -DPICO_SDK_PATH=/path/to/pico-sdk ..

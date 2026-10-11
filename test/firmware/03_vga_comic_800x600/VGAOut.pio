@@ -2,13 +2,12 @@
 ;; License: PolyForm Noncommercial 1.0.0, see LICENSE.md in this folder.
 ;; Free for noncommercial use; commercial use only with the author's consent.
 ;;
-;; Outputs one byte per two pixel clocks: bits 0-5 RRGGBB, bit 6 HSync,
-;; bit 7 VSync. Each byte is held for two cycles, so every pixel is doubled
-;; horizontally and a 800 pixel line needs only 400 bytes.
+;; Outputs one byte per pixel: bits 0-5 RRGGBB, bit 6 HSync, bit 7 VSync.
+;; One instruction per pixel, the pixel clock is set by the clock divider.
 
 .program VGAOut
 .wrap_target
-    out pins, 8 [1]
+    out pins, 8
 .wrap
 
 % c-sdk {

@@ -18,7 +18,7 @@ Each test lives in its own subfolder with a short `README.md`: what it shows, ho
 |---|---|---|
 | 1 | [`firmware/01_vga_testimage`](firmware/01_vga_testimage/) | VGA output: static test image (frame, mode, frequencies), one UF2 per mode |
 | 2 | [`firmware/02_vga_testimage_switch`](firmware/02_vga_testimage_switch/) | Buttons and all VGA modes: switch modes with PIXEL CLOCK / AUTO ADJUST |
-| 3 | [`firmware/03_vga_comic`](firmware/03_vga_comic/) | All 64 colours: comic picture in 800x600, 400x300 pixels shown 2x2 |
+| 3 | [`firmware/03_vga_comic_800x600`](firmware/03_vga_comic_800x600/) | All 64 colours and the full 800x600 area: comic picture |
 
 Each step stays as it is; later steps build on the earlier ones in a new folder.
 
