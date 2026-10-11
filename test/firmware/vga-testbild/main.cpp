@@ -62,7 +62,7 @@ static constexpr uint32_t MaxHTotal = 1024;
 static constexpr uint32_t MaxVTotal = 625;
 static constexpr uint32_t Border = 2;
 static constexpr uint32_t Zoom = 2;
-static constexpr uint32_t NumTxtLines = 4;
+static constexpr uint32_t NumTxtLines = 7;
 static constexpr uint32_t TxtLineGap = 8;
 
 // One buffer per distinct scanline; the frame is a table of line pointers.
@@ -145,6 +145,9 @@ static void buildFrame() {
                 T.hHz() / 1000.0f, T.vHz());
   std::snprintf(Txt[3], sizeof(Txt[3]), "PIXELCLOCK: %.3f MHZ",
                 T.pixelClkHz() / 1000000.0f);
+  Txt[4][0] = '\0';
+  std::snprintf(Txt[5], sizeof(Txt[5]), "THANKS TO SCRAP COMPUTING");
+  std::snprintf(Txt[6], sizeof(Txt[6]), "GREETINGS STEFAM");
 
   initLine(BlankLine, false);
   initLine(VSyncLine, true);

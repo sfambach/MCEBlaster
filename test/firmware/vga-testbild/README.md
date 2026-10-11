@@ -4,7 +4,7 @@ Static test picture for the MCE Blaster's VGA output. It does not read the TTL i
 
 The picture shows:
 - a white frame (2 pixels) along the edge of the visible area. All four sides must be visible and straight.
-- the VGA mode, line frequency (H), frame frequency (V) and pixel clock as text.
+- the VGA mode, line frequency (H), frame frequency (V) and pixel clock as text, plus a thank-you to Scrap Computing.
 
 The same values are printed once every 2 seconds over USB serial (e.g. `cat /dev/ttyACM0`).
 
