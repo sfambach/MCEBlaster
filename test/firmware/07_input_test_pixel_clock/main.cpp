@@ -18,6 +18,7 @@
 #include "hardware/dma.h"
 #include "hardware/pio.h"
 #include "hardware/pwm.h"
+#include "hardware/watchdog.h"
 #include "pico/multicore.h"
 #include "pico/stdlib.h"
 #include <cmath>
@@ -220,6 +221,26 @@ static void __not_in_flash_func(applyMasks)(uint32_t Row, uint8_t *Out) {
 }
 
 // ---------------------------------------------------------------------------
+// Hang diagnostics: each core writes where it is into a watchdog scratch
+// register, which survives the watchdog reset. After such a reset the screen
+// and the USB console show the last position of both cores.
+
+enum Stage : uint32_t {
+  StageBoot = 1,
+  StageMeasure,
+  StagePixelClock,
+  StageOverlay,
+  StagePrint,
+  StageCapWait = 11,
+  StageCapLines,
+  StageCapIdle,
+  StageCapSetup,
+};
+static void stage(uint32_t Core, Stage S) { watchdog_hw->scratch[Core] = S; }
+static bool WatchdogReset = false;
+static uint32_t ResetStage[2] = {};
+
+// ---------------------------------------------------------------------------
 // Picture capture on core 1, one sample per input pixel
 
 enum class Source : uint32_t { None, EGA, CGA, MDA };
@@ -333,6 +354,7 @@ static void __not_in_flash_func(armChannel)(uint32_t I) {
 /// without a signal.
 static bool __not_in_flash_func(captureFrame)(const CaptureSetup &S) {
   uint64_t Deadline = time_us_64() + 100000;
+  stage(1, StageCapWait);
   if (!waitPin(TTL_VSYNC_GPIO, !S.PosVSync, Deadline) ||
       !waitPin(TTL_VSYNC_GPIO, S.PosVSync, Deadline)) {
     LastFail = CaptureFail::NoVSync;
@@ -352,6 +374,7 @@ static bool __not_in_flash_func(captureFrame)(const CaptureSetup &S) {
     LastFail = CaptureFail::VSyncEnd;
     return false;
   }
+  stage(1, StageCapLines);
   dma_channel_start(CapChan[0]);
   pio_sm_set_enabled(CapPio, CapSM, true);
 
@@ -412,6 +435,7 @@ static void core1Main() {
     }
     if (SeenSeq != SetupSeq) {
       SeenSeq = SetupSeq;
+      stage(1, StageCapSetup);
       __dmb();
       S = Setup;
       buildLUT(S.Src);
@@ -426,6 +450,7 @@ static void core1Main() {
         FramesFailed = FramesFailed + 1;
     }
     if (!HavePicture) {
+      stage(1, StageCapIdle);
       for (uint32_t R = 0; R != Rows; ++R) {
         std::memset(OutLines[R], Black | Idle, HVisible);
         applyMasks(R, OutLines[R]);
@@ -548,16 +573,17 @@ static Measurement measure(uint32_t Ms) {
 struct TTLMode {
   const char *Name;
   float HHz, VHz;
+  float PixelHz; // the card's usual pixel clock
 };
 // MDA/CGA/EGA from the MCE Blaster's TimingsTTL.def. CGA and EGA 200 lines
 // share one timing. The VGA modes are not supported by the MCE Blaster; they
 // are listed because VGA cards with a 9-pin TTL output send them.
 static constexpr TTLMode TTLModes[] = {
-    {"MDA 720x350 50Hz", 18430, 50},
-    {"CGA/EGA 640x200 60Hz", 15700, 60},
-    {"EGA 640x350 60Hz", 21850, 60},
-    {"VGA 720x400 70Hz", 31469, 70},
-    {"VGA 640x480 60Hz", 31469, 60},
+    {"MDA 720x350 50Hz", 18430, 50, 16257000},
+    {"CGA/EGA 640x200 60Hz", 15700, 60, 14318181.0f},
+    {"EGA 640x350 60Hz", 21850, 60, 16257000},
+    {"VGA 720x400 70Hz", 31469, 70, 28322000},
+    {"VGA 640x480 60Hz", 31469, 60, 25175000},
 };
 
 static const char *guessMode(const Measurement &M) {
@@ -816,6 +842,48 @@ static constexpr KnownClock KnownClocks[] = {
 
 static PixelClock LastClock;
 
+// The clock the capture runs at: the measurement snapped to the nearest known
+// clock, or the mode's usual clock while there is no measurement. Snapping
+// keeps a small measuring error from smearing the end of each line.
+static constexpr float SnapTolerance = 0.015f; // relative
+struct CaptureClock {
+  float Hz = 0;
+  uint32_t PixelsPerLine = 0;
+  const char *Name = nullptr; // known clock, nullptr if measured only
+  bool FromMode = false;      // no measurement, the mode's usual clock
+};
+
+static CaptureClock captureClock(const char *Mode, float HHz,
+                                 const PixelClock &Measured) {
+  CaptureClock C;
+  float Best = SnapTolerance;
+  for (const KnownClock &K : KnownClocks) {
+    float Off = std::fabs(Measured.Hz - K.Hz) / K.Hz;
+    if (Measured.Hz > 0 && Off < Best) {
+      Best = Off;
+      C.Hz = K.Hz;
+      C.Name = K.Name;
+    }
+  }
+  if (Measured.Hz > 0 && !C.Name) {
+    C.Hz = Measured.Hz;
+  } else if (Measured.Hz == 0) {
+    for (const TTLMode &M : TTLModes)
+      if (M.Name == Mode)
+        C.Hz = M.PixelHz;
+    for (const KnownClock &K : KnownClocks)
+      if (K.Hz == C.Hz)
+        C.Name = K.Name;
+    C.FromMode = C.Hz > 0;
+  }
+  if (C.Hz == 0 || HHz < 1000)
+    return C;
+  // A whole number of pixels per line, at the line rate actually measured.
+  C.PixelsPerLine = (uint32_t)std::lround(C.Hz / HHz);
+  C.Hz = C.PixelsPerLine * HHz;
+  return C;
+}
+
 // The detected input is latched and held until a measurement leaves it by
 // more than these thresholds for LatchMisses seconds in a row, so a single
 // bad measurement neither drops nor changes the mode.
@@ -889,17 +957,19 @@ static void update(const Measurement &M) {
   // The pixel clock briefly disturbs the capture, so it is measured once per
   // latched input and retried only while it has no result.
   if (Latch.Valid && LastClock.Hz == 0) {
+    stage(0, StagePixelClock);
     uint8_t Mask = Latch.Src == Source::MDA ? 0x3 : 0x3f;
     PixelClock P = measurePixelClock(firstGPIO(Latch.Src), Mask, Latch.HHz);
     if (P.Hz > 0)
       LastClock = P;
   }
 
+  CaptureClock Clock = captureClock(Latch.Mode, Latch.HHz, LastClock);
   CaptureSetup New;
-  New.Src = LastClock.Hz > 0 ? Latch.Src : Source::None;
+  New.Src = Latch.Valid && Clock.Hz > 0 ? Latch.Src : Source::None;
   New.PosHSync = Latch.PosHSync;
   New.PosVSync = Latch.PosVSync;
-  New.PixelHz = LastClock.Hz;
+  New.PixelHz = Clock.Hz;
   New.LinesPerFrame =
       Latch.Valid ? (uint32_t)std::lround(Latch.HHz / Latch.VHz) : 0;
   bool Changed = New.Src != Setup.Src || New.PosHSync != Setup.PosHSync ||
@@ -912,6 +982,7 @@ static void update(const Measurement &M) {
     SetupSeq = SetupSeq + 1;
   }
 
+  stage(0, StageOverlay);
   Overlay &O = Overlays[!Shown];
   O = Overlay();
   auto Line = [&O](uint32_t L, const char *Fmt, auto... Args) {
@@ -936,15 +1007,14 @@ static void update(const Measurement &M) {
     Line(5, "Mode: %s (held %lu/%lu)", Latch.Mode, Misses, LatchMisses);
   else
     Line(5, "Mode: %s", Latch.Mode);
-  if (LastClock.Hz > 0) {
-    Line(6, "Pixel clock: %.3f MHz, %lu/line", LastClock.Hz / 1e6f,
-         LastClock.PixelsPerLine);
-    for (const KnownClock &K : KnownClocks)
-      if (std::fabs(LastClock.Hz - K.Hz) < K.Hz * 0.002f)
-        Line(7, "Known clock: %.3f MHz %s", K.Hz / 1e6f, K.Name);
-  } else if (Latch.Valid) {
-    Line(6, "Pixel clock: not enough detail");
-  }
+  if (Clock.Hz > 0)
+    Line(6, "Pixel clock: %.3f MHz, %lu/line", Clock.Hz / 1e6f,
+         Clock.PixelsPerLine);
+  if (LastClock.Hz > 0)
+    Line(7, "Measured %.3f MHz%s%s", LastClock.Hz / 1e6f,
+         Clock.Name ? ", snap " : "", Clock.Name ? Clock.Name : "");
+  else if (Latch.Valid)
+    Line(7, "Measured: no detail, %s", Clock.FromMode ? "mode clock" : "none");
   Line(8, "Picture: %s, phase %lu", sourceName(Latch.Src), (uint32_t)Phase);
 
   char States[16];
@@ -963,6 +1033,8 @@ static void update(const Measurement &M) {
          FailNames[(uint32_t)LastFail], LastFailLine);
   else
     Line(13, "Frames: %lu ok", Ok);
+  if (WatchdogReset)
+    Line(14, "Hang reset: core0 %lu core1 %lu", ResetStage[0], ResetStage[1]);
   Line(15, "PIXEL CLOCK: hide text");
   Line(16, "AUTO ADJUST: sampling phase");
 
@@ -973,13 +1045,21 @@ static void update(const Measurement &M) {
   }
   Shown = !Shown;
 
-  for (uint32_t L = 2; L != 14; ++L)
+  stage(0, StagePrint);
+  for (uint32_t L = 2; L != 15; ++L)
     if (O.Lines[L][0])
       std::printf("%s\n", O.Lines[L]);
   std::printf("\n");
 }
 
 int main() {
+  if (watchdog_caused_reboot()) {
+    WatchdogReset = true;
+    ResetStage[0] = watchdog_hw->scratch[0];
+    ResetStage[1] = watchdog_hw->scratch[1];
+  }
+  stage(0, StageBoot);
+  stage(1, StageBoot);
   set_sys_clock_khz(SysClkKHz, true);
   stdio_init_all();
   buildFrame();
@@ -998,8 +1078,14 @@ int main() {
     gpio_pull_up(Btn);
     gpio_set_irq_enabled(Btn, GPIO_IRQ_EDGE_FALL, true);
   }
+  // Resets the Pico if core 0 hangs for 4 s, so no BOOTSEL press is needed.
+  watchdog_enable(4000, /*pause_on_debug=*/true);
   while (true) {
-    update(measure(1000));
+    stage(0, StageMeasure);
+    watchdog_update();
+    Measurement M = measure(1000);
+    watchdog_update();
+    update(M);
 #ifdef PICO_DEFAULT_LED_PIN
     gpio_xor_mask(1u << PICO_DEFAULT_LED_PIN);
 #endif

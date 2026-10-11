@@ -26,6 +26,7 @@ pico_generate_pio_header(InputTestPixelClock ${CMAKE_CURRENT_LIST_DIR}/VGAOut.pi
 pico_generate_pio_header(InputTestPixelClock ${CMAKE_CURRENT_LIST_DIR}/InputCapture.pio)
 pico_generate_pio_header(InputTestPixelClock ${CMAKE_CURRENT_LIST_DIR}/FastSample.pio)
 target_link_libraries(InputTestPixelClock pico_stdlib pico_multicore hardware_pio
+                      hardware_watchdog
                       hardware_dma hardware_pwm)
 pico_enable_stdio_usb(InputTestPixelClock 1)
 pico_enable_stdio_uart(InputTestPixelClock 0)
