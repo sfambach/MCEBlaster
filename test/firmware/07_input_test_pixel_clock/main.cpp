@@ -808,36 +808,97 @@ static constexpr KnownClock KnownClocks[] = {
 };
 
 static PixelClock LastClock;
-static const char *LastMode = nullptr;
-static uint32_t SinceClock = 0;
+
+// The detected input is latched and held until a measurement leaves it by
+// more than these thresholds for LatchMisses seconds in a row, so a single
+// bad measurement neither drops nor changes the mode.
+static constexpr float LatchHTolerance = 0.02f; // relative
+static constexpr float LatchVToleranceHz = 2.0f;
+static constexpr uint32_t LatchMisses = 3;
+
+struct LatchedInput {
+  bool Valid = false;
+  const char *Mode = nullptr;
+  float HHz = 0, VHz = 0;
+  bool PosHSync = true, PosVSync = true;
+  Source Src = Source::None;
+};
+static LatchedInput Latch;
+static uint32_t Misses = 0;
+
+static bool matchesLatch(const Measurement &M) {
+  return M.H.Hz >= 1000 && M.V.Hz >= 10 &&
+         std::fabs(M.H.Hz - Latch.HHz) < Latch.HHz * LatchHTolerance &&
+         std::fabs(M.V.Hz - Latch.VHz) < LatchVToleranceHz &&
+         M.H.positive() == Latch.PosHSync && M.V.positive() == Latch.PosVSync;
+}
+
+static bool sourceToggles(const Measurement &M, Source Src) {
+  switch (Src) {
+  case Source::EGA:
+    return M.toggles(EGA_RGB_GPIO, 6);
+  case Source::CGA:
+    return M.toggles(CGA_RGB_GPIO, 6);
+  case Source::MDA:
+    return M.toggles(MDA_VI_GPIO, 2);
+  case Source::None:
+    break;
+  }
+  return false;
+}
+
+static void updateLatch(const Measurement &M) {
+  const char *Mode = guessMode(M);
+  if (Latch.Valid && matchesLatch(M)) {
+    Misses = 0;
+    // A blank screen toggles no colour pin, so the source picked then is a
+    // guess; switch once another source shows a picture.
+    Source Src = pickSource(M, Mode);
+    if (!sourceToggles(M, Latch.Src) && sourceToggles(M, Src)) {
+      Latch.Src = Src;
+      LastClock = PixelClock();
+    }
+    return;
+  }
+  if (Latch.Valid && ++Misses < LatchMisses)
+    return;
+  Misses = 0;
+  LastClock = PixelClock();
+  Latch = LatchedInput();
+  if (!Mode)
+    return;
+  Latch.Valid = true;
+  Latch.Mode = Mode;
+  Latch.HHz = M.H.Hz;
+  Latch.VHz = M.V.Hz;
+  Latch.PosHSync = M.H.positive();
+  Latch.PosVSync = M.V.positive();
+  Latch.Src = pickSource(M, Mode);
+}
 
 static void update(const Measurement &M) {
-  const char *Mode = guessMode(M);
-  Source Src = pickSource(M, Mode);
+  updateLatch(M);
 
-  // The pixel clock takes a moment to measure and briefly disturbs the
-  // capture, so it is measured when the mode changes and every 10 seconds.
-  if (!Mode) {
-    LastClock = PixelClock();
-  } else if (Mode != LastMode || LastClock.Hz == 0 || ++SinceClock >= 10) {
-    uint8_t Mask = Src == Source::MDA ? 0x3 : 0x3f;
-    PixelClock P = measurePixelClock(firstGPIO(Src), Mask, M.H.Hz);
+  // The pixel clock briefly disturbs the capture, so it is measured once per
+  // latched input and retried only while it has no result.
+  if (Latch.Valid && LastClock.Hz == 0) {
+    uint8_t Mask = Latch.Src == Source::MDA ? 0x3 : 0x3f;
+    PixelClock P = measurePixelClock(firstGPIO(Latch.Src), Mask, Latch.HHz);
     if (P.Hz > 0)
       LastClock = P;
-    SinceClock = 0;
   }
-  LastMode = Mode;
 
   CaptureSetup New;
-  New.Src = LastClock.Hz > 0 ? Src : Source::None;
-  New.PosHSync = M.H.positive();
-  New.PosVSync = M.V.positive();
+  New.Src = LastClock.Hz > 0 ? Latch.Src : Source::None;
+  New.PosHSync = Latch.PosHSync;
+  New.PosVSync = Latch.PosVSync;
   New.PixelHz = LastClock.Hz;
-  New.LinesPerFrame = Mode ? (uint32_t)std::lround(M.H.Hz / M.V.Hz) : 0;
+  New.LinesPerFrame =
+      Latch.Valid ? (uint32_t)std::lround(Latch.HHz / Latch.VHz) : 0;
   bool Changed = New.Src != Setup.Src || New.PosHSync != Setup.PosHSync ||
                  New.PosVSync != Setup.PosVSync ||
                  New.LinesPerFrame != Setup.LinesPerFrame ||
-                 std::fabs(New.PixelHz - Setup.PixelHz) > 1000;
+                 New.PixelHz != Setup.PixelHz;
   if (Changed) {
     Setup = New;
     __dmb();
@@ -860,19 +921,24 @@ static void update(const Measurement &M) {
          M.V.positive() ? "pos" : "neg", M.V.pulseUs());
   else
     Line(3, "VSync none (stuck %s)", M.V.HighFraction > 0.5f ? "high" : "low");
-  if (Mode)
+  if (M.H.Hz >= 1000 && M.V.Hz >= 10)
     Line(4, "Lines per frame: %.1f", M.H.Hz / M.V.Hz);
-  Line(5, "Mode: %s", Mode ? Mode : "NO SIGNAL");
+  if (!Latch.Valid)
+    Line(5, "Mode: NO SIGNAL");
+  else if (Misses)
+    Line(5, "Mode: %s (held %lu/%lu)", Latch.Mode, Misses, LatchMisses);
+  else
+    Line(5, "Mode: %s", Latch.Mode);
   if (LastClock.Hz > 0) {
     Line(6, "Pixel clock: %.3f MHz, %lu/line", LastClock.Hz / 1e6f,
          LastClock.PixelsPerLine);
     for (const KnownClock &K : KnownClocks)
       if (std::fabs(LastClock.Hz - K.Hz) < K.Hz * 0.002f)
         Line(7, "Known clock: %.3f MHz %s", K.Hz / 1e6f, K.Name);
-  } else if (Mode) {
+  } else if (Latch.Valid) {
     Line(6, "Pixel clock: not enough detail");
   }
-  Line(8, "Picture: %s, phase %lu", sourceName(Src), (uint32_t)Phase);
+  Line(8, "Picture: %s, phase %lu", sourceName(Latch.Src), (uint32_t)Phase);
 
   char States[16];
   pinStates(M, EGA_RGB_GPIO, 6, States);
