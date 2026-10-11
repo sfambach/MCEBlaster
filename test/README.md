@@ -6,6 +6,7 @@ Test programs for the MCE Blaster, collected in one place.
 
 | Folder | Content |
 |---|---|
+| `firmware/` | Test firmware for the Pico on the MCE Blaster (e.g. `vga-testbild`). |
 | `dos/` | Programs that run on the IBM PC / XT / AT and drive the MDA, CGA or EGA card (test patterns, mode switches, colour bars). |
 | `host/` | Programs that run on a PC/Linux host, e.g. to read the Pico over USB. |
 

@@ -1,0 +1,24 @@
+;; Outputs one byte per pixel: bits 0-5 RRGGBB, bit 6 HSync, bit 7 VSync.
+;; One instruction per pixel, the pixel clock is set by the clock divider.
+
+.program VGAOut
+.wrap_target
+    out pins, 8
+.wrap
+
+% c-sdk {
+static inline void VGAOutPioConfig(PIO Pio, uint SM, uint Offset,
+                                   uint FirstGPIO, float ClkDiv) {
+  for (uint I = 0; I != 8; ++I)
+    pio_gpio_init(Pio, FirstGPIO + I);
+  pio_sm_set_consecutive_pindirs(Pio, SM, FirstGPIO, 8, /*is_out=*/true);
+
+  pio_sm_config Conf = VGAOut_program_get_default_config(Offset);
+  sm_config_set_out_pins(&Conf, FirstGPIO, 8);
+  // LSB first, so the first byte in memory is the leftmost pixel.
+  sm_config_set_out_shift(&Conf, /*shift_right=*/true, /*autopull=*/true, 32);
+  sm_config_set_fifo_join(&Conf, PIO_FIFO_JOIN_TX);
+  sm_config_set_clkdiv(&Conf, ClkDiv);
+  pio_sm_init(Pio, SM, Offset, &Conf);
+}
+%}
