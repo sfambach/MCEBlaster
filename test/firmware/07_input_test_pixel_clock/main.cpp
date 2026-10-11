@@ -279,9 +279,21 @@ static uint16_t XMap[HVisible];
 static constexpr uint32_t DetectEvery = 8;
 static volatile uint32_t WinLeft = 0, WinRight = 0, WinTop = 0, WinBottom = 0;
 
+// Output rows each input line covers, [RowBegin, RowEnd): several when the
+// picture has fewer lines than the output, none when it has more and an
+// earlier line took the row. Precomputed so the line loop does no division.
+static constexpr uint32_t MaxLines = 1024;
+static uint8_t RowBegin[MaxLines], RowEnd[MaxLines];
+
 static void buildXMap() {
   for (uint32_t X = 0; X != HVisible; ++X)
     XMap[X] = WinLeft + X * (WinRight - WinLeft) / HVisible;
+  uint32_t Top = WinTop, Height = WinBottom - WinTop;
+  for (uint32_t Line = 0; Line != MaxLines; ++Line) {
+    bool In = Height && Line >= Top && Line < Top + Height;
+    RowBegin[Line] = In ? (Line - Top) * Rows / Height : 0;
+    RowEnd[Line] = In ? (Line - Top + 1) * Rows / Height : 0;
+  }
 }
 
 static void resetWindow(const CaptureSetup &S) {
@@ -293,11 +305,13 @@ static void resetWindow(const CaptureSetup &S) {
   buildXMap();
 }
 
-enum class CaptureFail : uint32_t { None, NoVSync, VSyncEnd, Line };
+enum class CaptureFail : uint32_t { None, NoVSync, VSyncEnd, Line, Late };
 static volatile uint32_t FramesOk = 0;
 static volatile uint32_t FramesFailed = 0;
 static volatile CaptureFail LastFail = CaptureFail::None;
 static volatile uint32_t LastFailLine = 0;
+// Most lines core 1 fell behind the capture since the last overlay update.
+static volatile uint32_t MaxLag = 0;
 
 // One DMA channel writes the whole frame into a ring buffer. The DMA write
 // ring wraps the address in hardware, so a capture that runs ahead of core 1
@@ -403,7 +417,6 @@ static bool __not_in_flash_func(captureFrame)(const CaptureSetup &S,
   dma_channel_start(CapChan);
   pio_sm_set_enabled(CapPio, CapSM, true);
 
-  uint32_t Top = WinTop, Height = WinBottom - WinTop;
   uint32_t FoundLeft = ~0u, FoundRight = 0, FoundTop = ~0u, FoundBottom = 0;
   const uint32_t Mask = RingBytes - 1;
   for (uint32_t Line = 0; Line != S.LinesPerFrame; ++Line) {
@@ -433,20 +446,34 @@ static bool __not_in_flash_func(captureFrame)(const CaptureSetup &S,
       continue;
     }
 
-    if (Line < Top || Line >= Top + Height)
+    if (Line >= MaxLines)
       continue;
-    // Rows this line covers: several when the picture has fewer lines than
-    // the output, none when it has more and an earlier line took the row.
-    uint32_t Row = (Line - Top) * Rows / Height;
-    uint32_t RowEnd = (Line - Top + 1) * Rows / Height;
-    if (Row == RowEnd)
+    uint32_t Row = RowBegin[Line], End = RowEnd[Line];
+    if (Row == End)
       continue;
     uint8_t *Out = OutLines[Row];
     for (uint32_t X = 0; X != HVisible; ++X)
       Out[X] = ColorLUT[Ring[(Start + XMap[X]) & Mask]];
-    for (uint32_t R = Row + 1; R < RowEnd; ++R)
-      std::memcpy(OutLines[R], Out, HVisible);
-    for (uint32_t R = Row; R < RowEnd; ++R)
+    // The capture overwrites a line RingLines lines later. If it got there
+    // while this line was read, the rest of the frame would come out shifted:
+    // stop and leave the rows of the last frame.
+    uint32_t Done = (Words - dma_channel_hw_addr(CapChan)->transfer_count) /
+                    WordsPerLine;
+    if (Done - Line > MaxLag)
+      MaxLag = Done - Line;
+    if (Done - Line + 1 >= RingBytes / S.Samples) {
+      stopCapture();
+      LastFail = CaptureFail::Late;
+      LastFailLine = Line;
+      return false;
+    }
+    for (uint32_t R = Row + 1; R < End; ++R) {
+      uint32_t *To = reinterpret_cast<uint32_t *>(OutLines[R]);
+      const uint32_t *From = reinterpret_cast<const uint32_t *>(Out);
+      for (uint32_t W = 0; W != HVisible / 4; ++W)
+        To[W] = From[W];
+    }
+    for (uint32_t R = Row; R < End; ++R)
       applyMasks(R, OutLines[R]);
   }
   if (Detect && FoundTop != ~0u) {
@@ -513,7 +540,8 @@ static void core1Main() {
       else
         FramesFailed = FramesFailed + 1;
     }
-    if (!HavePicture) {
+    // A late frame keeps the last picture; only a lost signal blanks it.
+    if (!HavePicture && LastFail != CaptureFail::Late) {
       stage(1, StageCapIdle);
       for (uint32_t R = 0; R != Rows; ++R) {
         std::memset(OutLines[R], Black | Idle, HVisible);
@@ -1151,12 +1179,15 @@ static void update(const Measurement &M) {
   uint32_t Ok = FramesOk, Failed = FramesFailed;
   FramesOk = 0;
   FramesFailed = 0;
-  static const char *FailNames[] = {"-", "no VSync", "VSync end", "line"};
+  static const char *FailNames[] = {"-", "no VSync", "VSync end", "line",
+                                    "late"};
+  uint32_t Lag = MaxLag;
+  MaxLag = 0;
   if (Failed)
-    Line(13, "Frames: %lu ok %lu bad (%s %lu)", Ok, Failed,
-         FailNames[(uint32_t)LastFail], LastFailLine);
+    Line(13, "Frames: %lu ok %lu bad (%s %lu), lag %lu", Ok, Failed,
+         FailNames[(uint32_t)LastFail], LastFailLine, Lag);
   else
-    Line(13, "Frames: %lu ok", Ok);
+    Line(13, "Frames: %lu ok, lag %lu lines", Ok, Lag);
   if (WatchdogReset && (ResetStage[0] || ResetStage[1]))
     Line(14, "Hang reset: core0 %lu core1 %lu", ResetStage[0], ResetStage[1]);
   Line(15, "PIXEL CLOCK: hide text");
