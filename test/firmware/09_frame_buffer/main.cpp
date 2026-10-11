@@ -361,7 +361,12 @@ static volatile uint32_t WinLeft = 0, WinRight = 0, WinTop = 0, WinBottom = 0;
 /// most half the screen lines, clipped to the frame buffer.
 static void placePicture() {
   uint32_t Width = WinRight - WinLeft, Lines = WinBottom - WinTop;
-  Width = (Width < FbWidth ? Width : FbWidth) & ~3u;
+  // Monitors and scalers tend to cut the first output pixels, so a picture
+  // as wide as the output starts one character in and loses its right edge,
+  // which text modes rarely use.
+  constexpr uint32_t MinLeft = 8;
+  constexpr uint32_t MaxWidth = HVisible - MinLeft;
+  Width = (Width < MaxWidth ? Width : MaxWidth) & ~3u;
   Lines = Lines < FbLines ? Lines : FbLines;
   uint32_t Shift = Lines <= FbLines / 2 ? 1 : 0;
   PicWidth = 0; // the output shows black while the values change
