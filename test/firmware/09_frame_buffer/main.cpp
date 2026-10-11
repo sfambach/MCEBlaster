@@ -1237,8 +1237,15 @@ static void update(const Measurement &M) {
   if (Samples > MaxSamples)
     Samples = MaxSamples;
   New.Samples = Samples / 4 * 4;
-  if (New.Left + New.Width > New.Samples ||
-      New.Top + New.Height > New.LinesPerFrame)
+  // A known mode keeps its window even when a slightly long HSync pulse
+  // leaves fewer samples: content-based detection on a nearly empty screen
+  // finds only a few characters and shows them as a narrow strip.
+  if (New.Width && New.Left + New.Width > New.Samples)
+    New.Width = New.Samples > New.Left + 64 ? New.Samples - New.Left : 0;
+  if (New.Height && New.Top + New.Height > New.LinesPerFrame)
+    New.Height =
+        New.LinesPerFrame > New.Top + 64 ? New.LinesPerFrame - New.Top : 0;
+  if (!New.Width || !New.Height)
     New.Width = New.Height = 0;
   if (New.Samples < 64)
     New.Src = Source::None;
