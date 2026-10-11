@@ -280,19 +280,33 @@ static constexpr uint32_t DetectEvery = 8;
 static volatile uint32_t WinLeft = 0, WinRight = 0, WinTop = 0, WinBottom = 0;
 
 // Output rows each input line covers, [RowBegin, RowEnd): several when the
-// picture has fewer lines than the output, none when it has more and an
-// earlier line took the row. Precomputed so the line loop does no division.
+// picture has fewer lines than the output. When it has more, the lines that
+// share a row are ORed together (RowMerge), so no thin stroke of a character
+// is lost; the text goes on top after the last of them (RowLast). Empty
+// range: the line is outside the picture. Precomputed so the line loop does
+// no division.
 static constexpr uint32_t MaxLines = 1024;
 static uint8_t RowBegin[MaxLines], RowEnd[MaxLines];
+static bool RowMerge[MaxLines], RowLast[MaxLines];
 
 static void buildXMap() {
   for (uint32_t X = 0; X != HVisible; ++X)
     XMap[X] = WinLeft + X * (WinRight - WinLeft) / HVisible;
   uint32_t Top = WinTop, Height = WinBottom - WinTop;
+  uint32_t PrevEnd = 0;
   for (uint32_t Line = 0; Line != MaxLines; ++Line) {
     bool In = Height && Line >= Top && Line < Top + Height;
-    RowBegin[Line] = In ? (Line - Top) * Rows / Height : 0;
-    RowEnd[Line] = In ? (Line - Top + 1) * Rows / Height : 0;
+    uint32_t Begin = In ? (Line - Top) * Rows / Height : 0;
+    uint32_t End = In ? (Line - Top + 1) * Rows / Height : 0;
+    if (In && End == Begin)
+      End = Begin + 1;
+    RowBegin[Line] = Begin;
+    RowEnd[Line] = End;
+    RowMerge[Line] = In && Line > Top && PrevEnd > Begin;
+    bool NextIn = Line + 1 < Top + Height;
+    RowLast[Line] =
+        In && !(NextIn && (Line + 1 - Top) * Rows / Height < End);
+    PrevEnd = In ? End : 0;
   }
 }
 
@@ -465,7 +479,21 @@ static bool __no_inline_not_in_flash_func(captureFrame)(const CaptureSetup &S,
     // the ring end needs the mask on every sample.
     uint8_t *Out = OutLines[Row];
     const uint16_t *Map = XMap;
-    if ((Start & Mask) + S.Samples <= RingBytes) {
+    bool Merge = RowMerge[Line];
+    if ((Start & Mask) + S.Samples > RingBytes) {
+      for (uint32_t X = 0; X != HVisible; ++X) {
+        uint8_t C = ColorLUT[Ring[(Start + Map[X]) & Mask]];
+        Out[X] = Merge ? Out[X] | C : C;
+      }
+    } else if (Merge) {
+      const uint8_t *Src = Ring + (Start & Mask);
+      for (uint32_t X = 0; X != HVisible; X += 4) {
+        Out[X] |= ColorLUT[Src[Map[X]]];
+        Out[X + 1] |= ColorLUT[Src[Map[X + 1]]];
+        Out[X + 2] |= ColorLUT[Src[Map[X + 2]]];
+        Out[X + 3] |= ColorLUT[Src[Map[X + 3]]];
+      }
+    } else {
       const uint8_t *Src = Ring + (Start & Mask);
       for (uint32_t X = 0; X != HVisible; X += 4) {
         Out[X] = ColorLUT[Src[Map[X]]];
@@ -473,9 +501,6 @@ static bool __no_inline_not_in_flash_func(captureFrame)(const CaptureSetup &S,
         Out[X + 2] = ColorLUT[Src[Map[X + 2]]];
         Out[X + 3] = ColorLUT[Src[Map[X + 3]]];
       }
-    } else {
-      for (uint32_t X = 0; X != HVisible; ++X)
-        Out[X] = ColorLUT[Ring[(Start + Map[X]) & Mask]];
     }
     // The capture overwrites a line RingLines lines later. If it got there
     // while this line was read, the rest of the frame would come out shifted:
@@ -496,8 +521,9 @@ static bool __no_inline_not_in_flash_func(captureFrame)(const CaptureSetup &S,
       for (uint32_t W = 0; W != HVisible / 4; ++W)
         To[W] = From[W];
     }
-    for (uint32_t R = Row; R < End; ++R)
-      applyMasks(R, OutLines[R]);
+    if (RowLast[Line])
+      for (uint32_t R = Row; R < End; ++R)
+        applyMasks(R, OutLines[R]);
   }
   if (Detect && FoundTop != ~0u) {
     bool Known = S.Width && S.Height;
