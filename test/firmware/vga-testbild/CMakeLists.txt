@@ -9,7 +9,8 @@
 # $ make -j
 #
 # Builds one UF2 per VGA mode: VGATestbild_640x400.uf2, VGATestbild_640x480.uf2
-# and VGATestbild_800x600.uf2.
+# and VGATestbild_800x600.uf2, plus VGATestbild_Modes.uf2 that switches between
+# them with the buttons.
 
 cmake_minimum_required(VERSION 3.13)
 
@@ -24,7 +25,7 @@ pico_sdk_init()
 function(add_testbild NAME MODE)
   add_executable(${NAME} main.cpp)
   pico_generate_pio_header(${NAME} ${CMAKE_CURRENT_LIST_DIR}/VGAOut.pio)
-  target_compile_definitions(${NAME} PRIVATE VGA_MODE=${MODE})
+  target_compile_definitions(${NAME} PRIVATE VGA_MODE=${MODE} ${ARGN})
   target_link_libraries(${NAME} pico_stdlib hardware_pio hardware_dma)
   pico_enable_stdio_usb(${NAME} 1)
   pico_enable_stdio_uart(${NAME} 0)
@@ -34,3 +35,5 @@ endfunction()
 add_testbild(VGATestbild_640x400 0)
 add_testbild(VGATestbild_640x480 1)
 add_testbild(VGATestbild_800x600 2)
+# All three modes, switched with the buttons. Starts in 640x480.
+add_testbild(VGATestbild_Modes 1 BUTTONS)

@@ -4,10 +4,11 @@
 // License: PolyForm Noncommercial 1.0.0, see LICENSE.md in this folder.
 // Free for noncommercial use; commercial use only with the author's consent.
 //
-// Static VGA test picture for the MCE Blaster: a white frame along the edge of
-// the visible area and the VGA resolution, line and frame frequency as text.
+// VGA test picture for the MCE Blaster: a white frame along the edge of the
+// visible area and the VGA resolution, line and frame frequency as text.
 // No TTL input is used, this only tests the VGA side (Pico, DAC, cable,
-// monitor).
+// monitor). With BUTTONS defined, PIXEL CLOCK selects the next and AUTO ADJUST
+// the previous mode; otherwise the picture stays in VGA_MODE.
 //
 
 #include "Font8x8.h"
@@ -18,6 +19,7 @@
 #include "pico/stdlib.h"
 #include <cstdio>
 #include <cstring>
+#include <initializer_list>
 
 #ifndef VGA_MODE
 #define VGA_MODE 1
@@ -26,6 +28,9 @@
 // Same pins as the MCE Blaster firmware (Common.h): GPIO 14-19 RRGGBB,
 // GPIO 20 HSync, GPIO 21 VSync.
 static constexpr uint32_t VGA_FIRST_GPIO = 14;
+// Buttons as on the MCE Blaster, active low.
+static constexpr uint32_t NEXT_BTN_GPIO = 22;  // PIXEL CLOCK
+static constexpr uint32_t PREV_BTN_GPIO = 28;  // AUTO ADJUST
 
 static constexpr uint8_t Black = 0b000000;
 static constexpr uint8_t White = 0b111111;
@@ -60,13 +65,16 @@ static constexpr VGATiming Timings[] = {
     {"800x600", 800, 24, 72, 128, 600, 1, 2, 22, Polarity::Pos, Polarity::Pos,
      7},
 };
-static constexpr const VGATiming &T = Timings[VGA_MODE];
+static constexpr uint32_t NumModes = sizeof(Timings) / sizeof(Timings[0]);
+static uint32_t Mode = VGA_MODE;
+static const VGATiming *TP = &Timings[VGA_MODE];
+#define T (*TP)
 
 static constexpr uint32_t MaxHTotal = 1024;
 static constexpr uint32_t MaxVTotal = 625;
 static constexpr uint32_t Border = 2;
 static constexpr uint32_t Zoom = 2;
-static constexpr uint32_t NumTxtLines = 7;
+static constexpr uint32_t NumTxtLines = 9;
 static constexpr uint32_t TxtLineGap = 8;
 
 // One buffer per distinct scanline; the frame is a table of line pointers.
@@ -78,6 +86,8 @@ static uint8_t TxtLines[NumTxtLines][FontHeight][MaxHTotal]
     __attribute__((aligned(4)));
 static const uint8_t *Frame[MaxVTotal];
 
+static PIO Pio = pio0;
+static uint SM;
 static int DataChan;
 static int CtrlChan;
 
@@ -127,8 +137,15 @@ static void buildFrame() {
   std::snprintf(Txt[3], sizeof(Txt[3]), "Pixel clock: %.3f MHz",
                 T.pixelClkHz() / 1000000.0f);
   Txt[4][0] = '\0';
-  std::snprintf(Txt[5], sizeof(Txt[5]), "Thanks to Scrap Computing");
-  std::snprintf(Txt[6], sizeof(Txt[6]), "Greetings SteFam");
+#ifdef BUTTONS
+  std::snprintf(Txt[5], sizeof(Txt[5]), "Mode %lu/%lu", Mode + 1, NumModes);
+  std::snprintf(Txt[6], sizeof(Txt[6]), "< AUTO ADJUST   PIXEL CLOCK >");
+#else
+  Txt[5][0] = '\0';
+  Txt[6][0] = '\0';
+#endif
+  std::snprintf(Txt[7], sizeof(Txt[7]), "Thanks to Scrap Computing");
+  std::snprintf(Txt[8], sizeof(Txt[8]), "Greetings SteFam");
 
   initLine(BlankLine, false);
   initLine(VSyncLine, true);
@@ -177,8 +194,7 @@ static void ctrlChanIRQ() {
 }
 
 static void startVGA() {
-  PIO Pio = pio0;
-  uint SM = pio_claim_unused_sm(Pio, true);
+  SM = pio_claim_unused_sm(Pio, true);
   uint Offset = pio_add_program(Pio, &VGAOut_program);
   VGAOutPioConfig(Pio, SM, Offset, VGA_FIRST_GPIO, (float)T.ClkDiv);
 
@@ -210,6 +226,62 @@ static void startVGA() {
   dma_channel_start(CtrlChan);
 }
 
+#ifdef BUTTONS
+/// Stops the output, rebuilds the frame for \p NewMode and restarts it.
+static void switchMode(uint32_t NewMode) {
+  irq_set_enabled(DMA_IRQ_0, false);
+  // Unchain first so the aborted data channel does not restart the other.
+  hw_clear_bits(&dma_hw->ch[DataChan].al1_ctrl, DMA_CH0_CTRL_TRIG_CHAIN_TO_BITS);
+  hw_set_bits(&dma_hw->ch[DataChan].al1_ctrl,
+              (uint32_t)DataChan << DMA_CH0_CTRL_TRIG_CHAIN_TO_LSB);
+  dma_channel_abort(CtrlChan);
+  dma_channel_abort(DataChan);
+  pio_sm_set_enabled(Pio, SM, false);
+  pio_sm_clear_fifos(Pio, SM);
+  pio_sm_restart(Pio, SM);
+
+  Mode = NewMode;
+  TP = &Timings[Mode];
+  buildFrame();
+
+  pio_sm_set_clkdiv(Pio, SM, (float)T.ClkDiv);
+  pio_sm_clkdiv_restart(Pio, SM);
+  hw_clear_bits(&dma_hw->ch[DataChan].al1_ctrl, DMA_CH0_CTRL_TRIG_CHAIN_TO_BITS);
+  hw_set_bits(&dma_hw->ch[DataChan].al1_ctrl,
+              (uint32_t)CtrlChan << DMA_CH0_CTRL_TRIG_CHAIN_TO_LSB);
+  dma_channel_set_trans_count(DataChan, T.hTotal() / 4, /*trigger=*/false);
+  dma_channel_set_read_addr(CtrlChan, &Frame[0], /*trigger=*/false);
+  dma_hw->ints0 = 1u << CtrlChan;
+  irq_set_enabled(DMA_IRQ_0, true);
+  pio_sm_set_enabled(Pio, SM, true);
+  dma_channel_start(CtrlChan);
+}
+
+/// Debounced button: \returns true once per press.
+struct Button {
+  uint32_t GPIO;
+  uint32_t StableCnt = 0;
+  bool Pressed = false;
+  bool poll() {
+    bool Down = !gpio_get(GPIO);
+    if (Down == Pressed) {
+      StableCnt = 0;
+      return false;
+    }
+    if (++StableCnt < 3)
+      return false;
+    StableCnt = 0;
+    Pressed = Down;
+    return Down;
+  }
+};
+#endif
+
+static void printStatus() {
+  std::printf("VGA test: %s %.2f Hz, H %.3f kHz, pixel clock %.3f MHz\n",
+              T.Name, T.vHz(), T.hHz() / 1000.0f, T.pixelClkHz() / 1000000.0f);
+}
+
 int main() {
   set_sys_clock_khz(SysClkKHz, true);
   stdio_init_all();
@@ -220,13 +292,34 @@ int main() {
   gpio_init(PICO_DEFAULT_LED_PIN);
   gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);
 #endif
-  while (true) {
-#ifdef PICO_DEFAULT_LED_PIN
-    gpio_xor_mask(1u << PICO_DEFAULT_LED_PIN);
+#ifdef BUTTONS
+  Button Next{NEXT_BTN_GPIO};
+  Button Prev{PREV_BTN_GPIO};
+  for (Button *B : {&Next, &Prev}) {
+    gpio_init(B->GPIO);
+    gpio_set_dir(B->GPIO, GPIO_IN);
+    gpio_pull_up(B->GPIO);
+  }
 #endif
-    std::printf("VGA test: %s %.2f Hz, H %.3f kHz, pixel clock %.3f MHz\n",
-                T.Name, T.vHz(), T.hHz() / 1000.0f,
-                T.pixelClkHz() / 1000000.0f);
-    sleep_ms(2000);
+  absolute_time_t NextStatus = get_absolute_time();
+  while (true) {
+#ifdef BUTTONS
+    if (Next.poll()) {
+      switchMode((Mode + 1) % NumModes);
+      printStatus();
+    }
+    if (Prev.poll()) {
+      switchMode((Mode + NumModes - 1) % NumModes);
+      printStatus();
+    }
+#endif
+    if (absolute_time_diff_us(NextStatus, get_absolute_time()) >= 0) {
+      NextStatus = make_timeout_time_ms(2000);
+#ifdef PICO_DEFAULT_LED_PIN
+      gpio_xor_mask(1u << PICO_DEFAULT_LED_PIN);
+#endif
+      printStatus();
+    }
+    sleep_ms(10);
   }
 }

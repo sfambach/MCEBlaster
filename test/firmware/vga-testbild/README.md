@@ -16,7 +16,9 @@ The same values are printed once every 2 seconds over USB serial (e.g. `cat /dev
 | `VGATestbild_640x480.uf2` | 640x480, HSync −, VSync − | 31.500 kHz | 60.00 Hz | 25.2 MHz |
 | `VGATestbild_800x600.uf2` | 800x600, HSync +, VSync + | 35.156 kHz | 56.25 Hz | 36.0 MHz |
 
-These are the three modes the MCE Blaster outputs. The Pico runs at 252 MHz so that both pixel clocks are an integer divider (/10 and /7); 25.2 MHz is within the tolerance of the 25.175 MHz VGA standard.
+| `VGATestbild_Modes.uf2` | all three, switched with the buttons (starts in 640x480) | | | |
+
+These are the three modes the MCE Blaster outputs. In `VGATestbild_Modes.uf2` the PIXEL CLOCK button selects the next mode and AUTO ADJUST the previous one; the picture shows the mode number and the button hint. The Pico runs at 252 MHz so that both pixel clocks are an integer divider (/10 and /7); 25.2 MHz is within the tolerance of the 25.175 MHz VGA standard.
 
 ## Build
 
