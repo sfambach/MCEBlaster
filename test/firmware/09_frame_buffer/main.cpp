@@ -74,9 +74,13 @@ static uint16_t PairLUT[256];
 
 static uint8_t BlankLine[HTotal] __attribute__((aligned(4)));
 static uint8_t VSyncLine[HTotal] __attribute__((aligned(4)));
-// Visible lines alternate between two buffers; the output sends one while
-// the other is filled for the next line.
-static uint8_t Work[2][HTotal] __attribute__((aligned(4)));
+// Visible lines rotate through four buffers. The line IRQ fills the buffer
+// for two lines ahead, so it may come more than a line late without the
+// output catching up with it.
+static constexpr uint32_t NumWork = 4, FillAhead = 2;
+static uint8_t Work[NumWork][HTotal] __attribute__((aligned(4)));
+// Lines the IRQ filled while the output was already sending them.
+static volatile uint32_t LateLines = 0;
 static const uint8_t *Frame[VTotal];
 
 static PIO VGAPio = pio0;
@@ -93,12 +97,12 @@ static void initLine(uint8_t *Line, bool InVSync) {
 static void buildFrame() {
   initLine(BlankLine, false);
   initLine(VSyncLine, true);
-  initLine(Work[0], false);
-  initLine(Work[1], false);
+  for (uint32_t I = 0; I != NumWork; ++I)
+    initLine(Work[I], false);
   for (uint32_t Y = 0; Y != VTotal; ++Y) {
     uint32_t SyncStart = VVisible + VFrontPorch;
     if (Y < VVisible)
-      Frame[Y] = Work[Y & 1];
+      Frame[Y] = Work[Y % NumWork];
     else if (Y >= SyncStart && Y < SyncStart + VSync)
       Frame[Y] = VSyncLine;
     else
@@ -139,15 +143,23 @@ static void __not_in_flash_func(fillLine)(uint32_t Y, uint8_t *Out) {
 // buffer, with a whole scanline of time to do so.
 static void __not_in_flash_func(ctrlChanIRQ)() {
   dma_hw->ints0 = 1u << CtrlChan;
-  // The data channel has just started on line Next - 1; fill the other
-  // buffer for line Next.
+  // The data channel has just started on line Next - 1; fill the buffer for
+  // line Next + FillAhead - 1.
   uint32_t Next = (const uint8_t **)dma_hw->ch[CtrlChan].read_addr - Frame;
   if (Next == VTotal) {
     dma_channel_set_read_addr(CtrlChan, &Frame[0], /*trigger=*/false);
     Next = 0;
   }
-  if (Next < VVisible)
-    fillLine(Next, Work[Next & 1]);
+  uint32_t Y = Next + FillAhead - 1;
+  if (Y >= VTotal)
+    Y -= VTotal;
+  if (Y < VVisible) {
+    uint8_t *Buf = Work[Y % NumWork];
+    uintptr_t Sending = dma_hw->ch[DataChan].read_addr;
+    if (Sending > (uintptr_t)Buf && Sending <= (uintptr_t)(Buf + HTotal))
+      LateLines = LateLines + 1;
+    fillLine(Y, Buf);
+  }
 }
 
 static void startVGA() {
@@ -1285,7 +1297,8 @@ static void update(const Measurement &M) {
   FramesFailed = 0;
   static const char *FailNames[] = {"-", "no VSync", "VSync end", "line",
                                     "late"};
-  uint32_t Lag = MaxLag, Stalled = StalledFrames;
+  uint32_t Lag = MaxLag, Stalled = StalledFrames, OutLate = LateLines;
+  LateLines = 0;
   MaxLag = 0;
   Lag /= Setup.Samples >= 4 ? Setup.Samples / 4 : 1;
   StalledFrames = 0;
@@ -1293,7 +1306,8 @@ static void update(const Measurement &M) {
     Line(13, "Frames: %lu ok %lu bad (%s %lu) lag %lu", Ok, Failed,
          FailNames[(uint32_t)LastFail], LastFailLine, Lag);
   else
-    Line(13, "Frames: %lu ok, lag %lu, stall %lu", Ok, Lag, Stalled);
+    Line(13, "Frames: %lu ok, lag %lu, stall %lu, out %lu", Ok, Lag,
+         Stalled, OutLate);
   if (WatchdogReset && (ResetStage[0] || ResetStage[1]))
     Line(14, "Hang reset: core0 %lu core1 %lu", ResetStage[0], ResetStage[1]);
   Line(15, "PIXEL CLOCK: hide text");

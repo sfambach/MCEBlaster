@@ -4,7 +4,7 @@
 
 - Core 0 measures the input, latches the mode and the pixel clock and draws the text, as in step 7. The title line shows the build time, so you can tell which firmware is on the Pico.
 - Core 1 samples each line at the input pixel clock and stores the picture window, one nibble (16 colours) per input pixel, in the frame buffer: up to 720 x 480 pixels, 168 KB. "lag", "late" and "stall" on the Frames line mean the same as in step 7.
-- The output runs on its own at 640x480 timing (31.5 kHz, 60 Hz, both syncs negative), but with 720 pixels per line at 28 MHz, so a 720-pixel input line fits 1:1. A DMA IRQ on core 0 converts the next screen line from the frame buffer and puts the text on top, one line ahead of the output.
+- The output runs on its own at 640x480 timing (31.5 kHz, 60 Hz, both syncs negative), but with 720 pixels per line at 28 MHz, so a 720-pixel input line fits 1:1. A DMA IRQ on core 0 converts the next screen line from the frame buffer and puts the text on top, two lines ahead of the output, so it may come a line late. "out" on the Frames line counts lines it filled too late anyway.
 - Picture placement: centred; 350 or 400 lines go out 1:1, modes with at most 240 lines (CGA, EGA 200) are doubled. Input and output run at their own rates, so a moving picture can tear; a still one cannot.
 - Colours: blue, green, red and intensity. EGA's secondary colour lines count as intensity, so EGA's 64 colours are folded onto 16; colour 6 is brown as on a CGA monitor. MDA: black, grey, white.
 - `PIXEL CLOCK` button: hide or show the text.
