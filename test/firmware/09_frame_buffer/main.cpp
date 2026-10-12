@@ -620,9 +620,15 @@ static bool __no_inline_not_in_flash_func(captureFrame)(const CaptureSetup &S,
   // picture pixel, within MaxEarlyPx.
   if (Detect && Known && FoundTop != ~0u && FoundLeft < WinLeft &&
       FoundLeft + MaxEarlyPx >= S.Left) {
-    WinLeft = FoundLeft;
-    WinRight = FoundLeft + S.Width;
-    placePicture();
+    // Whole characters, 9 pixels wide in 720-pixel modes, else 8: the first
+    // lit pixel is often a glyph's second or third column.
+    uint32_t CharPx = S.Width == 720 ? 9 : 8;
+    uint32_t Shift = (S.Left - FoundLeft + CharPx - 1) / CharPx * CharPx;
+    if (Shift <= S.Left) {
+      WinLeft = S.Left - Shift;
+      WinRight = WinLeft + S.Width;
+      placePicture();
+    }
   }
   if (Detect && !Known && FoundTop != ~0u) {
     bool First = !WindowFound;
