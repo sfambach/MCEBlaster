@@ -207,3 +207,11 @@ $ make -j
 
 # License
 The project is GPLv2.
+
+# AI disclosure (fork sfambach/MCEBlaster)
+Changes in this fork (e.g. the `test/` folder) are partly made with the help of an AI assistant (Claude).
+
+# Thanks
+Many thanks to Scrap Computing for the MCE Blaster, a great little project with very few parts. The additions in this fork (test firmware in `test/`) build on it.
+
+Greetings, SteFam

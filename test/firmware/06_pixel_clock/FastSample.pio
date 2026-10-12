@@ -1,0 +1,24 @@
+;; Copyright (C) 2026 Stefan Fambach (SteFam), https://www.fambach.net
+;; License: PolyForm Noncommercial 1.0.0, see LICENSE.md in this folder.
+;; Free for noncommercial use; commercial use only with the author's consent.
+;;
+;; Samples 8 input pins on every SM clock cycle (252 MHz with divider 1),
+;; four samples per 32-bit word.
+
+.program FastSample
+.wrap_target
+    in pins, 8
+.wrap
+
+% c-sdk {
+static inline void FastSamplePioInit(PIO Pio, uint SM, uint Offset,
+                                     uint FirstGPIO) {
+  pio_sm_config Conf = FastSample_program_get_default_config(Offset);
+  sm_config_set_in_pins(&Conf, FirstGPIO);
+  // Shift right: the first sample ends up in the lowest byte.
+  sm_config_set_in_shift(&Conf, /*shift_right=*/true, /*autopush=*/true, 32);
+  sm_config_set_fifo_join(&Conf, PIO_FIFO_JOIN_RX);
+  sm_config_set_clkdiv(&Conf, 1.0f);
+  pio_sm_init(Pio, SM, Offset, &Conf);
+}
+%}
