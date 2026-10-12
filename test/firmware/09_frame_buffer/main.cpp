@@ -1132,6 +1132,7 @@ static constexpr KnownClock KnownClocks[] = {
     {28322000, "VGA 720"},
     {28636363.0f, "8x NTSC"},
     {14161000, "VGA 720 /2"},
+    {12587500, "VGA 640 /2"},
 };
 
 static PixelClock LastClock;
