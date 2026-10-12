@@ -855,6 +855,9 @@ static constexpr TTLMode TTLModes[] = {
     // so the picture can start 28 pixels in at most; the window may still
     // move left by itself.
     {"VGA 720x400 72Hz TVGA", 32442, 72.25f, 28322000, 28, 720, 35, 400},
+    // The TVGA8800 in MDA emulation: MDA's CRTC geometry (882 pixels, 135
+    // of them HSync) at the VGA clock of 28.322 MHz instead of 16.257 MHz.
+    {"MDA 720x350 86Hz TVGA", 32110, 86.3f, 28322000, 9, 720, 4, 350},
     // Measured on a Trident TVGA 9-pin output in its non-VGA switch setting;
     // the pixel clock is unknown, so it is measured only.
     {"TVGA 200 lines 117Hz", 31055, 117.6f, 0, 0, 0, 0, 0},
