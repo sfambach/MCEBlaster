@@ -355,6 +355,7 @@ static constexpr uint32_t MaxSamples = 768;
 // unknown mode it grows to every non-black sample and line seen.
 // Detection runs every DetectEvery frames; those frames are not stored.
 static constexpr uint32_t DetectEvery = 8;
+static constexpr uint32_t MaxEarlyPx = 18;
 static volatile uint32_t WinLeft = 0, WinRight = 0, WinTop = 0, WinBottom = 0;
 
 /// Places the window's picture on the screen: 1:1, doubled when it has at
@@ -563,6 +564,16 @@ static bool __no_inline_not_in_flash_func(captureFrame)(const CaptureSetup &S,
         FoundTop = Line < FoundTop ? Line : FoundTop;
         FoundBottom = Line + 1;
       }
+      // A line read after the capture overwrote it would widen the window
+      // with garbage: drop the whole detection frame.
+      uint32_t Behind = Words - dma_channel_hw_addr(CapChan)->transfer_count -
+                        Line * WordsPerLine;
+      if (Behind >= RingWords) {
+        stopCapture();
+        LastFail = CaptureFail::Late;
+        LastFailLine = Line;
+        return false;
+      }
       continue;
     }
 
@@ -598,9 +609,19 @@ static bool __no_inline_not_in_flash_func(captureFrame)(const CaptureSetup &S,
       return false;
     }
   }
-  if (Detect && FoundTop != ~0u) {
-    bool Known = S.Width && S.Height;
-    bool First = !Known && !WindowFound;
+  bool Known = S.Width && S.Height;
+  // A known mode keeps the table's width and lines, but some cards start
+  // their picture a character earlier than the standard timing (a Trident
+  // TVGA on 720x400 by 9 pixels): the window moves left to the first
+  // picture pixel, within MaxEarlyPx.
+  if (Detect && Known && FoundTop != ~0u && FoundLeft < WinLeft &&
+      FoundLeft + MaxEarlyPx >= S.Left) {
+    WinLeft = FoundLeft;
+    WinRight = FoundLeft + S.Width;
+    placePicture();
+  }
+  if (Detect && !Known && FoundTop != ~0u) {
+    bool First = !WindowFound;
     WindowFound = true;
     WinLeft = First || FoundLeft < WinLeft ? FoundLeft : WinLeft;
     WinRight = First || FoundRight > WinRight ? FoundRight : WinRight;
@@ -653,10 +674,9 @@ static void core1Main() {
         configCapture(S);
     }
     static uint32_t FrameCount = 0;
-    // A known mode keeps the table's window: detection on a 760-sample line
-    // can fall behind the capture, read overwritten ring lines and grow the
-    // window to everything.
-    bool Detect = !(S.Width && S.Height) && ++FrameCount % DetectEvery == 0;
+    // Every DetectEvery-th frame looks for the picture's edges instead of
+    // being stored; a known mode only lets its window start earlier.
+    bool Detect = ++FrameCount % DetectEvery == 0;
     bool HavePicture = S.Src != Source::None && captureFrame(S, Detect);
     if (S.Src != Source::None) {
       if (HavePicture)
