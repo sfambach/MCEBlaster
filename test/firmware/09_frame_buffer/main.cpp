@@ -1079,6 +1079,8 @@ struct CaptureClock {
   bool FromMode = false;      // no measurement, the mode's usual clock
 };
 
+static constexpr float MaxModeDeviation = 0.05f;
+
 static CaptureClock captureClock(const char *Mode, float HHz,
                                  const PixelClock &Measured) {
   CaptureClock C;
@@ -1086,12 +1088,20 @@ static CaptureClock captureClock(const char *Mode, float HHz,
   for (const TTLMode &M : TTLModes)
     if (M.Name == Mode)
       ModeHz = M.PixelHz;
+  // Thin text has few edges, and the measurement can then be off by 10 %
+  // (31.2 instead of 28.3 MHz on a 720x400 input). Cards differ from the
+  // mode's usual clock by a few percent at most, so a measurement further
+  // off is dropped for the mode's clock.
+  PixelClock Kept = Measured;
+  if (ModeHz > 0 && std::fabs(Kept.Hz - ModeHz) / ModeHz > MaxModeDeviation)
+    Kept.Hz = 0;
+  const PixelClock &Use = Kept;
   // The mode's usual clock wins whenever the measurement is near it: the
   // measurement scatters by a few tenths of a percent, and 28.322 and
   // 28.636 MHz are only 1.1 % apart, so the nearest known clock alone
   // picked the wrong one on a 720x400 input.
-  if (Measured.Hz > 0 && ModeHz > 0 &&
-      std::fabs(Measured.Hz - ModeHz) / ModeHz < SnapTolerance) {
+  if (Use.Hz > 0 && ModeHz > 0 &&
+      std::fabs(Use.Hz - ModeHz) / ModeHz < SnapTolerance) {
     C.Hz = ModeHz;
     for (const KnownClock &K : KnownClocks)
       if (K.Hz == ModeHz)
@@ -1102,16 +1112,16 @@ static CaptureClock captureClock(const char *Mode, float HHz,
   }
   float Best = SnapTolerance;
   for (const KnownClock &K : KnownClocks) {
-    float Off = std::fabs(Measured.Hz - K.Hz) / K.Hz;
-    if (Measured.Hz > 0 && Off < Best) {
+    float Off = std::fabs(Use.Hz - K.Hz) / K.Hz;
+    if (Use.Hz > 0 && Off < Best) {
       Best = Off;
       C.Hz = K.Hz;
       C.Name = K.Name;
     }
   }
-  if (Measured.Hz > 0 && !C.Name) {
-    C.Hz = Measured.Hz;
-  } else if (Measured.Hz == 0) {
+  if (Use.Hz > 0 && !C.Name) {
+    C.Hz = Use.Hz;
+  } else if (Use.Hz == 0) {
     C.Hz = ModeHz;
     for (const KnownClock &K : KnownClocks)
       if (K.Hz == C.Hz)
@@ -1293,7 +1303,9 @@ static void update(const Measurement &M) {
   if (Clock.Hz > 0)
     Line(6, "Pixel clock: %.3f MHz, %lu/line", Clock.Hz / 1e6f,
          Clock.PixelsPerLine);
-  if (LastClock.Hz > 0)
+  if (LastClock.Hz > 0 && Clock.FromMode)
+    Line(7, "Measured %.3f MHz, ignored", LastClock.Hz / 1e6f);
+  else if (LastClock.Hz > 0)
     Line(7, "Measured %.3f MHz%s%s", LastClock.Hz / 1e6f,
          Clock.Name ? ", snap " : "", Clock.Name ? Clock.Name : "");
   else if (Latch.Valid)
