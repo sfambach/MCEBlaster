@@ -535,6 +535,7 @@ static bool __no_inline_not_in_flash_func(captureFrame)(const CaptureSetup &S,
   CapPio->fdebug = 1u << (PIO_FDEBUG_RXSTALL_LSB + CapSM);
   pio_sm_set_enabled(CapPio, CapSM, true);
 
+  const bool Known = S.Width && S.Height;
   uint32_t FoundLeft = ~0u, FoundRight = 0, FoundTop = ~0u, FoundBottom = 0;
   const uint32_t Mask = RingBytes - 1;
   const uint32_t Top = WinTop, Left = WinLeft;
@@ -553,9 +554,13 @@ static bool __no_inline_not_in_flash_func(captureFrame)(const CaptureSetup &S,
     uint32_t Start = Line * S.Samples;
 
     if (Detect) {
-      uint32_t L = 0, R = S.Samples;
+      // A known mode only looks left of its window, which is fast enough
+      // for 31.5 kHz lines; a full scan of empty lines falls behind there.
+      uint32_t L = 0, R = Known ? Left : S.Samples;
       while (L != R && !(Ring[(Start + L) & Mask] & S.ColorMask))
         ++L;
+      if (Known)
+        R = L == R ? L : L + 1;
       while (R != L && !(Ring[(Start + R - 1) & Mask] & S.ColorMask))
         --R;
       if (L != R) {
@@ -609,7 +614,6 @@ static bool __no_inline_not_in_flash_func(captureFrame)(const CaptureSetup &S,
       return false;
     }
   }
-  bool Known = S.Width && S.Height;
   // A known mode keeps the table's width and lines, but some cards start
   // their picture a character earlier than the standard timing (a Trident
   // TVGA on 720x400 by 9 pixels): the window moves left to the first
