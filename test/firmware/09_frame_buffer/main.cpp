@@ -1125,6 +1125,10 @@ static CaptureClock captureClock(const char *Mode, float HHz,
   PixelClock Kept = Measured;
   if (ModeHz > 0 && std::fabs(Kept.Hz - ModeHz) / ModeHz > MaxModeDeviation)
     Kept.Hz = 0;
+  // VGA timings come with their standard clock: a sparse screen measured
+  // 28.825 MHz on 720x400, which snapped to NTSC's 28.636 instead of 28.322.
+  if (Mode && std::strncmp(Mode, "VGA", 3) == 0 && ModeHz > 0)
+    Kept.Hz = 0;
   const PixelClock &Use = Kept;
   // The mode's usual clock wins whenever the measurement is near it: the
   // measurement scatters by a few tenths of a percent, and 28.322 and
@@ -1393,7 +1397,9 @@ static void update(const Measurement &M) {
 }
 
 int main() {
-  if (watchdog_caused_reboot()) {
+  // Only a timeout of this firmware's watchdog, not a reboot into BOOTSEL
+  // for flashing, leaves meaningful stages behind.
+  if (watchdog_enable_caused_reboot()) {
     WatchdogReset = true;
     ResetStage[0] = watchdog_hw->scratch[0];
     ResetStage[1] = watchdog_hw->scratch[1];
