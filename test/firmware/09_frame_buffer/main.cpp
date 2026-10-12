@@ -1148,6 +1148,7 @@ struct CaptureClock {
 };
 
 static constexpr float MaxModeDeviation = 0.05f;
+static constexpr float MaxFarDeviation = 0.08f;
 
 static CaptureClock captureClock(const char *Mode, float HHz,
                                  const PixelClock &Measured) {
@@ -1159,15 +1160,20 @@ static CaptureClock captureClock(const char *Mode, float HHz,
   // Thin text has few edges, and the measurement can then be off by 10 %
   // (31.2 instead of 28.3 MHz on a 720x400 input). Cards differ from the
   // mode's usual clock by a few percent at most, so a measurement further
-  // off is dropped for the mode's clock, unless it is a known clock: a VGA
-  // card sends CGA, EGA and MDA timing from its own 25.175 or 28.322 MHz.
+  // off is dropped for the mode's clock. A VGA card sends CGA, EGA and MDA
+  // timing from its own 25.175 or 28.322 MHz, so a measurement far from the
+  // mode's clock but near another known one takes that one: EGA from a
+  // TVGA8800 measured 26.49 MHz for 25.175.
   PixelClock Kept = Measured;
-  bool NearKnown = false;
-  for (const KnownClock &K : KnownClocks)
-    NearKnown |= std::fabs(Kept.Hz - K.Hz) / K.Hz < SnapTolerance;
-  if (ModeHz > 0 && !NearKnown &&
-      std::fabs(Kept.Hz - ModeHz) / ModeHz > MaxModeDeviation)
+  if (ModeHz > 0 && std::fabs(Kept.Hz - ModeHz) / ModeHz > MaxModeDeviation) {
+    float Near = Kept.Hz, Best = MaxFarDeviation;
     Kept.Hz = 0;
+    for (const KnownClock &K : KnownClocks)
+      if (std::fabs(Near - K.Hz) / K.Hz < Best) {
+        Best = std::fabs(Near - K.Hz) / K.Hz;
+        Kept.Hz = K.Hz;
+      }
+  }
   // VGA timings come with their standard clock: a sparse screen measured
   // 28.825 MHz on 720x400, which snapped to NTSC's 28.636 instead of 28.322.
   if (Mode && std::strncmp(Mode, "VGA", 3) == 0 && ModeHz > 0)
