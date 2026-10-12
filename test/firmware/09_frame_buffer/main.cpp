@@ -19,8 +19,10 @@
 #include "hardware/pio.h"
 #include "hardware/pwm.h"
 #include "hardware/watchdog.h"
+#include "pico/bootrom.h"
 #include "pico/multicore.h"
 #include "pico/stdlib.h"
+#include "tusb.h"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -1394,6 +1396,19 @@ static void update(const Measurement &M) {
     if (O.Lines[L][0])
       std::printf("%s\n", O.Lines[L]);
   std::printf("\n");
+}
+
+// The 1200 baud BOOTSEL reset, as in the SDK, but with the watchdog, core 1
+// and the DMA stopped first: with them running, the Pico often vanished from
+// USB instead of coming up as a drive.
+extern "C" void tud_cdc_line_coding_cb(uint8_t, cdc_line_coding_t const *Coding) {
+  if (Coding->bit_rate != 1200)
+    return;
+  hw_clear_bits(&watchdog_hw->ctrl, WATCHDOG_CTRL_ENABLE_BITS);
+  multicore_reset_core1();
+  for (uint32_t Chan = 0; Chan != NUM_DMA_CHANNELS; ++Chan)
+    dma_channel_abort(Chan);
+  rom_reset_usb_boot_extra(-1, 0, false);
 }
 
 int main() {

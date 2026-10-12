@@ -29,5 +29,9 @@ target_link_libraries(FrameBuffer pico_stdlib pico_multicore hardware_pio
                       hardware_watchdog
                       hardware_dma hardware_pwm)
 pico_enable_stdio_usb(FrameBuffer 1)
+# main.cpp handles the 1200 baud reset itself: it stops the watchdog, core 1
+# and DMA before it jumps to BOOTSEL.
+target_compile_definitions(FrameBuffer PRIVATE
+                           PICO_STDIO_USB_ENABLE_RESET_VIA_BAUD_RATE=0)
 pico_enable_stdio_uart(FrameBuffer 0)
 pico_add_extra_outputs(FrameBuffer)
