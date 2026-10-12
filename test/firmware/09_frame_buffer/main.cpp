@@ -539,6 +539,8 @@ static bool __no_inline_not_in_flash_func(captureFrame)(const CaptureSetup &S,
 
   const bool Known = S.Width && S.Height;
   uint32_t FoundLeft = ~0u, FoundRight = 0, FoundTop = ~0u, FoundBottom = 0;
+  constexpr uint32_t MaxLeftPx = 64, MinEarlyLines = 4;
+  uint8_t EarlyLines[MaxLeftPx] = {};
   const uint32_t Mask = RingBytes - 1;
   const uint32_t Top = WinTop, Left = WinLeft;
   const uint32_t Width = PicWidth, Lines = PicLines;
@@ -565,7 +567,14 @@ static bool __no_inline_not_in_flash_func(captureFrame)(const CaptureSetup &S,
         R = L == R ? L : L + 1;
       while (R != L && !(Ring[(Start + R - 1) & Mask] & S.ColorMask))
         --R;
-      if (L != R) {
+      if (Known) {
+        // Only picture lines count, and a column only when several lines
+        // start there: a single stray sample moved the window a character
+        // too far.
+        if (L != R && L < MaxLeftPx && Line >= Top && Line - Top < Lines &&
+            EarlyLines[L] != 255)
+          ++EarlyLines[L];
+      } else if (L != R) {
         FoundLeft = L < FoundLeft ? L : FoundLeft;
         FoundRight = R > FoundRight ? R : FoundRight;
         FoundTop = Line < FoundTop ? Line : FoundTop;
@@ -616,6 +625,12 @@ static bool __no_inline_not_in_flash_func(captureFrame)(const CaptureSetup &S,
       return false;
     }
   }
+  if (Detect && Known)
+    for (uint32_t X = 0; X != MaxLeftPx && FoundTop == ~0u; ++X)
+      if (EarlyLines[X] >= MinEarlyLines) {
+        FoundLeft = X;
+        FoundTop = 0;
+      }
   // A known mode keeps the table's width and lines, but some cards start
   // their picture a character earlier than the standard timing (a Trident
   // TVGA on 720x400 by 9 pixels): the window moves left to the first
