@@ -849,6 +849,11 @@ static constexpr TTLMode TTLModes[] = {
     {"EGA 640x350 60Hz", 21850, 60, 16257000, 0, 0, 0, 0},
     {"VGA 720x400 70Hz", 31469, 70, 28322000, 54, 720, 35, 400},
     {"VGA 640x480 60Hz", 31469, 60, 25175000, 48, 640, 33, 480},
+    // A Trident TVGA8800 in EGA emulation: VGA's 720x400 at 28.322 MHz with
+    // 873 instead of 900 pixels per line. Where the 27 pixels are taken from
+    // is not known; the back porch is a guess on the early side, and the
+    // window may still move left by itself.
+    {"VGA 720x400 72Hz TVGA", 32442, 72.25f, 28322000, 36, 720, 35, 400},
     // Measured on a Trident TVGA 9-pin output in its non-VGA switch setting;
     // the pixel clock is unknown, so it is measured only.
     {"TVGA 200 lines 117Hz", 31055, 117.6f, 0, 0, 0, 0, 0},
