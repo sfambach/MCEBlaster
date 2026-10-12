@@ -860,6 +860,9 @@ static constexpr TTLMode TTLModes[] = {
     // The card repeats the first character of each row in the 9 pixels
     // before it, so the window starts one character later than MDA's.
     {"MDA 720x350 86Hz TVGA", 32110, 86.3f, 28322000, 18, 720, 4, 350},
+    // A VGA card's CGA timing from its 28.322 MHz halved (TRIEMU 0.2.0):
+    // 912 pixels per line like CGA, but 15.53 instead of 15.70 kHz.
+    {"CGA 640x200 59Hz VGA", 15530, 59.3f, 14161000, 0, 0, 0, 0},
     // Measured on a Trident TVGA 9-pin output in its non-VGA switch setting;
     // the pixel clock is unknown, so it is measured only.
     {"TVGA 200 lines 117Hz", 31055, 117.6f, 0, 0, 0, 0, 0},
@@ -868,11 +871,17 @@ static constexpr TTLMode TTLModes[] = {
 static const char *guessMode(const Measurement &M) {
   if (M.H.Hz < 1000 || M.V.Hz < 10)
     return nullptr;
-  for (const TTLMode &Mode : TTLModes)
-    if (std::fabs(M.H.Hz - Mode.HHz) < Mode.HHz * 0.03f &&
-        std::fabs(M.V.Hz - Mode.VHz) < 3.0f)
-      return Mode.Name;
-  return "unknown";
+  // The nearest line rate wins: CGA from a VGA card is 1 % off real CGA.
+  const char *Best = "unknown";
+  float BestOff = 0.03f;
+  for (const TTLMode &Mode : TTLModes) {
+    float Off = std::fabs(M.H.Hz - Mode.HHz) / Mode.HHz;
+    if (Off < BestOff && std::fabs(M.V.Hz - Mode.VHz) < 3.0f) {
+      BestOff = Off;
+      Best = Mode.Name;
+    }
+  }
+  return Best;
 }
 
 /// One character per pin: '*' toggles, '+' always high, '-' always low.
@@ -1122,6 +1131,7 @@ static constexpr KnownClock KnownClocks[] = {
     {25175000, "VGA 640"},
     {28322000, "VGA 720"},
     {28636363.0f, "8x NTSC"},
+    {14161000, "VGA 720 /2"},
 };
 
 static PixelClock LastClock;
@@ -1149,9 +1159,14 @@ static CaptureClock captureClock(const char *Mode, float HHz,
   // Thin text has few edges, and the measurement can then be off by 10 %
   // (31.2 instead of 28.3 MHz on a 720x400 input). Cards differ from the
   // mode's usual clock by a few percent at most, so a measurement further
-  // off is dropped for the mode's clock.
+  // off is dropped for the mode's clock, unless it is a known clock: a VGA
+  // card sends CGA, EGA and MDA timing from its own 25.175 or 28.322 MHz.
   PixelClock Kept = Measured;
-  if (ModeHz > 0 && std::fabs(Kept.Hz - ModeHz) / ModeHz > MaxModeDeviation)
+  bool NearKnown = false;
+  for (const KnownClock &K : KnownClocks)
+    NearKnown |= std::fabs(Kept.Hz - K.Hz) / K.Hz < SnapTolerance;
+  if (ModeHz > 0 && !NearKnown &&
+      std::fabs(Kept.Hz - ModeHz) / ModeHz > MaxModeDeviation)
     Kept.Hz = 0;
   // VGA timings come with their standard clock: a sparse screen measured
   // 28.825 MHz on 720x400, which snapped to NTSC's 28.636 instead of 28.322.
